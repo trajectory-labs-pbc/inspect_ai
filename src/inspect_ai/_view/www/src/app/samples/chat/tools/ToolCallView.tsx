@@ -14,6 +14,7 @@ import ExpandablePanel from "../../../../components/ExpandablePanel";
 import { MessageContent } from "../MessageContent";
 import { defaultContext } from "../MessageContents";
 import styles from "./ToolCallView.module.css";
+import { AnnotatedToolOutput, ToolAnnotation } from "./AnnotatedToolOutput";
 import { ToolInput } from "./ToolInput";
 import { ToolTitle } from "./ToolTitle";
 
@@ -115,6 +116,34 @@ export const ToolCallView: FC<ToolCallViewProps> = ({
 
   const contents = mode !== "compact" ? input : input || functionCall;
   const context = defaultContext("tool");
+
+  const annotation = useMemo<ToolAnnotation | undefined>(() => {
+    if (functionCall === "browser" && input && typeof input === "object") {
+      const inputObj = input as Record<string, any>;
+      const action = inputObj.action;
+      if (
+        [
+          "left_click",
+          "right_click",
+          "middle_click",
+          "double_click",
+          "triple_click",
+          "scroll",
+          "type",
+          "key",
+        ].includes(action)
+      ) {
+        return {
+          action,
+          coordinate: inputObj.coordinate,
+          text: inputObj.text,
+          scrollDirection: inputObj.scroll_direction,
+        };
+      }
+    }
+    return undefined;
+  }, [functionCall, input]);
+
   return (
     <div className={clsx(styles.toolCallView)}>
       <div>
@@ -140,10 +169,14 @@ export const ToolCallView: FC<ToolCallViewProps> = ({
           lines={15}
           className={clsx("text-size-small")}
         >
-          <MessageContent contents={normalizedContent} context={context} />
+          <AnnotatedToolOutput annotation={annotation}>
+            <MessageContent contents={normalizedContent} context={context} />
+          </AnnotatedToolOutput>
         </ExpandablePanel>
       ) : (
-        <MessageContent contents={normalizedContent} context={context} />
+        <AnnotatedToolOutput annotation={annotation}>
+          <MessageContent contents={normalizedContent} context={context} />
+        </AnnotatedToolOutput>
       )}
     </div>
   );
