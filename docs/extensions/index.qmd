@@ -1,16 +1,6 @@
 ---
 title: "Inspect Extensions"
-listing:
-  id: extensions
-  contents: 
-    - extensions.yml
-  type: table
-  fields: 
-    - name
-    - description
-    - author
-  field-display-names: { "name": "Name" }
-aliases: 
+aliases:
   - /integrations/index.html
 ---
 
@@ -21,4 +11,4 @@ td:nth-child(3) { width: 120px; }
 </style>
 ```
 
-Inspect extensions include packages that provide tools, agents, scorers, and sandboxes; orchestration and observability tools; and systems which view and analyze Inspect logs.
+{{< include extensions_content.md >}}

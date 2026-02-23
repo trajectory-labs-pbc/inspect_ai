@@ -3,8 +3,9 @@ project:
    resources: 
       - CNAME
       - llms.txt
-   pre-render: 
+   pre-render:
       - reference/filter/sidebar.py
+      - extensions/import.py
    post-render: 
       - scripts/post-render.sh
 

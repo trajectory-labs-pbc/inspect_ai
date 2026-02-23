@@ -1,32 +1,26 @@
-- name: "[Inspect VS Code](https://marketplace.visualstudio.com/items?itemName=ukaisi.inspect-ai)"
-  description: |
-    VS Code extension that assists with developing and debugging Inspect evaluations.
-  author: "[Meridian](https://github.com/meridianlabs-ai/inspect-vscode)"
-  categories: ["Tooling"]
-
 - name: "[Inspect Cyber](https://ukgovernmentbeis.github.io/inspect_cyber/)"
   description: |
     Python package that streamlines the process of creating agentic cyber evaluations in Inspect.
   author: "[UK AISI](https://github.com/UKGovernmentBEIS/inspect_cyber)"
-  categories: ["Framework"]
+  categories: ["Frameworks"]
 
 - name: "[Petri](https://safety-research.github.io/petri/)"
   description: |
     Framework for rapidly testing concrete alignment hypotheses end‑to‑end, including automatic generation of realistic audit scenarios.
   author: "[Anthropic](https://www.anthropic.com/research/petri-open-source-auditing)"
-  categories: ["Framework"]
+  categories: ["Frameworks"]
 
 - name: "[Control Arena](https://github.com/UKGovernmentBEIS/control-arena)"
   description: |
     Framework for running experiments on AI Control and Monitoring.
   author: "[UK AISI](https://github.com/UKGovernmentBEIS/control-arena)"
-  categories: ["Framework"]
+  categories: ["Frameworks"]
 
 - name: "[Inspect SWE](https://meridianlabs-ai.github.io/inspect_swe/)"
   description: |
     Software engineering agents (Claude Code and Codex CLI) for Inspect.
   author: "[Meridian](https://github.com/meridianlabs-ai/inspect_swe)"
-  categories: ["Agents"]
+  categories: ["Suites & Agents"]
 
 - name: "[Inspect Scout](https://meridianlabs-ai.github.io/inspect_scout/)"
   description: |
@@ -58,50 +52,62 @@
   author: "[Arcadia](https://www.arcadiaimpact.org/)"
   categories: ["Analysis"]
 
+- name: "[Inspect Flow](https://meridianlabs-ai.github.io/inspect_flow/)"
+  description: |
+    Workflow orchestration for running Inspect evaluations at scale with repeatability and maintainability.
+  author: "[Meridian](https://github.com/meridianlabs-ai/inspect_flow)"
+  categories: ["Tooling"]
+
 - name: "[Evaljobs](https://github.com/dvsrepo/evaljobs)"
   description: |
-    Run evals on Hugging Face and share results and code on Hugging Face Hub.
+    Run evals on Hugging Face GPUs and share results and code on the Hugging Face Hub.
   author: "[Hugging Face](https://github.com/dvsrepo/evaljobs)"
+  categories: ["Tooling"]
+
+- name: "[Inspect VS Code](https://marketplace.visualstudio.com/items?itemName=ukaisi.inspect-ai)"
+  description: |
+    VS Code extension that assists with developing and debugging Inspect evaluations.
+  author: "[Meridian](https://github.com/meridianlabs-ai/inspect-vscode)"
   categories: ["Tooling"]
 
 - name: "[OpenBench](https://github.com/groq/openbench)"
   description: |
     Standardized, reproducible benchmarking for LLMs across 30+ evals.
   author: "[Groq](https://github.com/groq)"
-  categories: ["Tooling"]
+  categories: ["Suites & Agents"]
 
 - name: "[k8s Sandbox](https://k8s-sandbox.aisi.org.uk/)"
   description: |
     Python package that provides a Kubernetes sandbox environment for Inspect.
   author: "[UK AISI](https://github.com/UKGovernmentBEIS/inspect_k8s_sandbox)"
-  categories: ["Sandbox"]
+  categories: ["Sandboxes"]
 
 - name: "[EC2 Sandbox](https://github.com/UKGovernmentBEIS/inspect_ec2_sandbox)"
   description: |
     Python package that provides a EC2 virtual machine sandbox environment for Inspect.
   author: "[UK AISI](https://github.com/UKGovernmentBEIS/inspect_ec2_sandbox)"
-  categories: ["Sandbox"]
+  categories: ["Sandboxes"]
 
-- name: "[Modal Sandbox](https://github.com/anthonyduong9/inspect_modal_sandbox)"
+- name: "[Modal Sandbox](https://github.com/meridianlabs-ai/inspect_sandboxes/tree/main/src/inspect_sandboxes/modal)"
   description: |
-    Python package that provides a Modal container sandbox environment for Inspect.
-  author: "[Anthony Duong](https://github.com/anthonyduong9)"
-  categories: ["Sandbox"]
+    Serverless container sandbox for Inspect using Modal's cloud infrastructure.
+  author: "[Meridian](https://github.com/meridianlabs-ai/inspect_sandboxes)"
+  categories: ["Sandboxes"]
 
 - name: "[Proxmox Sandbox](https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox)"
   description: Use virtual machines, running within a [Proxmox](https://www.proxmox.com/en/products/proxmox-virtual-environment/overview) instance, as Inspect sandboxes.
   author: "[UK AISI](https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox)"
-  categories: ["Sandbox"]
+  categories: ["Sandboxes"]
 
 - name: "[Inspect Policy Sandbox](https://github.com/Dedulus/inspect-policy-sandbox)"
   description: |
     Policy enforced sandbox wrapper for Inspect AI that allows fine grained control
     over command execution and file I/O without modifying core sandbox backends.
   author: "[Arnab Mitra](https://github.com/Dedulus)"
-  categories: ["Sandbox"]
+  categories: ["Sandboxes"]
 
 - name: "[Inspect Harbor](https://github.com/meridianlabs-ai/inspect_harbor)"
   description: |
     Run Harbor RL tasks with Inspect AI, with access to 40+ registry datasets including terminal-bench, replicationbench, and compilebench.
   author: "[Meridian](https://github.com/meridianlabs-ai/inspect_harbor)"
-  categories: ["Framework"]
+  categories: ["Suites & Agents"]
