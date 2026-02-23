@@ -22,6 +22,7 @@ interface ToolCallViewProps {
   id: string;
   functionCall: string;
   input?: unknown;
+  precedingBrowserAction?: Record<string, unknown>;
   description?: string;
   contentType?: string;
   view?: ToolCallContent;
@@ -56,6 +57,7 @@ export const ToolCallView: FC<ToolCallViewProps> = ({
   id,
   functionCall,
   input,
+  precedingBrowserAction,
   description,
   contentType,
   view,
@@ -118,31 +120,23 @@ export const ToolCallView: FC<ToolCallViewProps> = ({
   const context = defaultContext("tool");
 
   const annotation = useMemo<ToolAnnotation | undefined>(() => {
-    if (functionCall === "browser" && input && typeof input === "object") {
-      const inputObj = input as Record<string, any>;
-      const action = inputObj.action;
-      if (
-        [
-          "left_click",
-          "right_click",
-          "middle_click",
-          "double_click",
-          "triple_click",
-          "scroll",
-          "type",
-          "key",
-        ].includes(action)
-      ) {
+    // For screenshot tool calls, use the preceding browser action's arguments
+    // to determine what annotation to show. The pattern is:
+    //   browser(left_click, coord=[x,y]) → text response
+    //   browser(screenshot) → image response ← annotate THIS with click info
+    if (precedingBrowserAction) {
+      const action = precedingBrowserAction.action as string | undefined;
+      if (action) {
         return {
           action,
-          coordinate: inputObj.coordinate,
-          text: inputObj.text,
-          scrollDirection: inputObj.scroll_direction,
+          coordinate: precedingBrowserAction.coordinate as [number, number] | undefined,
+          text: precedingBrowserAction.text as string | undefined,
+          scrollDirection: precedingBrowserAction.scroll_direction as string | undefined,
         };
       }
     }
     return undefined;
-  }, [functionCall, input]);
+  }, [precedingBrowserAction]);
 
   return (
     <div className={clsx(styles.toolCallView)}>

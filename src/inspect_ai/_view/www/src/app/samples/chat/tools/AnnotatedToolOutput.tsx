@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 export interface ToolAnnotation {
   action: string;
@@ -12,50 +12,101 @@ interface AnnotatedToolOutputProps {
   annotation?: ToolAnnotation;
 }
 
+interface ImageInfo {
+  img: HTMLImageElement;
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
 export const AnnotatedToolOutput: React.FC<AnnotatedToolOutputProps> = ({
   children,
   annotation,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [imageRects, setImageRects] = useState<
-    { img: HTMLImageElement; rect: DOMRect; naturalWidth: number; naturalHeight: number }[]
-  >([]);
+  const [imageInfos, setImageInfos] = useState<ImageInfo[]>([]);
+  const observedImagesRef = useRef<Set<HTMLImageElement>>(new Set());
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
+  const updateImageInfos = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const images = Array.from(container.querySelectorAll("img"));
+    if (images.length === 0) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const infos: ImageInfo[] = images
+      .filter((img) => img.naturalWidth > 0 && img.naturalHeight > 0)
+      .map((img) => {
+        const imgRect = img.getBoundingClientRect();
+        return {
+          img,
+          top: imgRect.top - containerRect.top,
+          left: imgRect.left - containerRect.left,
+          width: imgRect.width,
+          height: imgRect.height,
+          naturalWidth: img.naturalWidth,
+          naturalHeight: img.naturalHeight,
+        };
+      });
+
+    setImageInfos(infos);
+  }, []);
+
+  // Observe images for resize/load; use MutationObserver to catch late-mounting images
   useEffect(() => {
     if (!annotation) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-    const updateRects = () => {
-      if (!containerRef.current) return;
-      const images = Array.from(containerRef.current.querySelectorAll("img"));
-      const rects = images.map((img) => ({
-        img,
-        rect: img.getBoundingClientRect(),
-        naturalWidth: img.naturalWidth,
-        naturalHeight: img.naturalHeight,
-      }));
-      setImageRects(rects);
-    };
+    const resizeObs = new ResizeObserver(updateImageInfos);
+    resizeObserverRef.current = resizeObs;
 
-    const observer = new ResizeObserver(updateRects);
-    if (containerRef.current) {
-      const images = Array.from(containerRef.current.querySelectorAll("img"));
-      images.forEach((img) => {
-        observer.observe(img);
-        img.addEventListener("load", updateRects);
-      });
-      updateRects();
-    }
-
-    return () => {
-      observer.disconnect();
-      if (containerRef.current) {
-        const images = Array.from(containerRef.current.querySelectorAll("img"));
-        images.forEach((img) => {
-          img.removeEventListener("load", updateRects);
-        });
+    const trackImage = (img: HTMLImageElement) => {
+      if (observedImagesRef.current.has(img)) return;
+      observedImagesRef.current.add(img);
+      resizeObs.observe(img);
+      img.addEventListener("load", updateImageInfos);
+      // If already loaded, trigger update
+      if (img.complete && img.naturalWidth > 0) {
+        updateImageInfos();
       }
     };
-  }, [annotation, children]);
+
+    // Track any existing images
+    container.querySelectorAll("img").forEach(trackImage);
+
+    // Watch for images added later (e.g. after expand, lazy load)
+    const mutationObs = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of Array.from(mutation.addedNodes)) {
+          if (node instanceof HTMLImageElement) {
+            trackImage(node);
+          } else if (node instanceof HTMLElement) {
+            node.querySelectorAll("img").forEach(trackImage);
+          }
+        }
+      }
+    });
+    mutationObs.observe(container, { childList: true, subtree: true });
+
+    // Initial update
+    updateImageInfos();
+
+    return () => {
+      resizeObs.disconnect();
+      mutationObs.disconnect();
+      for (const img of observedImagesRef.current) {
+        img.removeEventListener("load", updateImageInfos);
+      }
+      observedImagesRef.current.clear();
+      resizeObserverRef.current = null;
+    };
+  }, [annotation, updateImageInfos]);
 
   if (!annotation) {
     return <>{children}</>;
@@ -64,25 +115,19 @@ export const AnnotatedToolOutput: React.FC<AnnotatedToolOutputProps> = ({
   return (
     <div ref={containerRef} style={{ position: "relative" }}>
       {children}
-      {imageRects.map((info, index) => {
-        // Calculate scale
-        const scaleX = info.rect.width / (info.naturalWidth || 1440);
-        const scaleY = info.rect.height / (info.naturalHeight || 900);
-
-        // Calculate position relative to the container
-        const containerRect = containerRef.current!.getBoundingClientRect();
-        const imgTop = info.rect.top - containerRect.top;
-        const imgLeft = info.rect.left - containerRect.left;
+      {imageInfos.map((info, index) => {
+        const scaleX = info.width / (info.naturalWidth || 1440);
+        const scaleY = info.height / (info.naturalHeight || 900);
 
         return (
           <div
             key={index}
             style={{
               position: "absolute",
-              top: imgTop,
-              left: imgLeft,
-              width: info.rect.width,
-              height: info.rect.height,
+              top: info.top,
+              left: info.left,
+              width: info.width,
+              height: info.height,
               pointerEvents: "none",
               overflow: "hidden",
             }}
