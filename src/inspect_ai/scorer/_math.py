@@ -857,7 +857,7 @@ def math() -> Scorer:
             denom = max(abs(N(ans1)), abs(N(ans2)))
             if denom < 1e-10:
                 return True
-            return err / denom < 1e-10
+            return bool(err / denom < 1e-10)
 
         if ans1 is None or ans2 is None:
             return False
@@ -870,7 +870,7 @@ def math() -> Scorer:
             if _both_have_equals(ans1, ans2):
                 return bool(ans1.equals(ans2))  # type: ignore[union-attr]
             if isinstance(ans1, str) or isinstance(ans2, str):
-                return ans1 == ans2
+                return bool(ans1 == ans2)
             return _approx_equal(ans1, ans2)
         except Exception:
             return False
