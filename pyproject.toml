@@ -185,14 +185,8 @@ dev = [
   "pytest-mock",
   "pytest-watcher",
   "pytest-xdist",
-<<<<<<< nathan-fix-for-math-tasks
   "ruff==0.9.6",            # match version specified in .pre-commit-config.yaml
-  "sympy",
-  "together",
-=======
-  "ruff==0.9.6",           # match version specified in .pre-commit-config.yaml
   "together>=2.0.0",
->>>>>>> main
   "textual-dev>=0.86.2",
   "trio",
   "pandas-stubs",
