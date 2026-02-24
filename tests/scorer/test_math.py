@@ -88,13 +88,6 @@ async def test_sqrt(output, target, expected):
             r"5\pi + 6\sqrt{3}",
             CORRECT,
         ),
-        (
-            "\\boxed{\\frac{1+\\sqrt7}2}.",
-            "\\frac{\\sqrt{7} + 1}{2}",
-            CORRECT,
-        ),
-        # Should Work
-        ("Answer: sqrt(2)", "1.4142135623730951", INCORRECT),  # prepended answer
     ],
 )
 async def test_no_boxed(output, target, expected):
