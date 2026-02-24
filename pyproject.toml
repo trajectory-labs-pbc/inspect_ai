@@ -194,6 +194,7 @@ dev = [
   "types-grpcio",
   "types-Markdown",
   "types-PyYAML",
+  "types-regex",
   "types-beautifulsoup4",
   "types-aioboto3",
   "types-boto3",

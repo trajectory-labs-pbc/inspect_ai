@@ -687,14 +687,14 @@ def math() -> Scorer:
         Scorer function for evaluating mathematical answers.
     """
     try:
-        import sympy
-        from sympy import N
-        from sympy.parsing.latex import parse_latex
-        from sympy.parsing.sympy_parser import (
-            implicit_application,
-            implicit_multiplication_application,
-            parse_expr,
-            standard_transformations,
+        import sympy  # type: ignore
+        from sympy import N  # type: ignore
+        from sympy.parsing.latex import parse_latex  # type: ignore
+        from sympy.parsing.sympy_parser import (  # type: ignore
+            implicit_application,  # type: ignore
+            implicit_multiplication_application,  # type: ignore
+            parse_expr,  # type: ignore
+            standard_transformations,  # type: ignore
         )
     except ImportError:
         raise pip_dependency_error("math() scorer", ["sympy"]) from None
