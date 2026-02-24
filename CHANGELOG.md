@@ -1,3 +1,7 @@
+## Unreleased
+
+- vLLM: Support for LoRA (Low-Rank Adaptation) via `--enable-lora` server option and LoRA-tuned server startup logic.
+
 ## 0.3.183 (24 February 2026)
 
 - Improved naming and typeinfo for `exec_remote()` output stream events.
