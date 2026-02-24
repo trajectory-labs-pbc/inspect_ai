@@ -5,7 +5,6 @@ project:
       - llms.txt
    pre-render:
       - reference/filter/sidebar.py
-      - extensions/import.py
    post-render: 
       - scripts/post-render.sh
 

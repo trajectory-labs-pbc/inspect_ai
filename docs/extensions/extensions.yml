@@ -1,3 +1,9 @@
+- name: "[Inspect SWE](https://meridianlabs-ai.github.io/inspect_swe/)"
+  description: |
+    Software engineering agents (Claude Code and Codex CLI) for Inspect.
+  author: "[Meridian](https://github.com/meridianlabs-ai/inspect_swe)"
+  categories: ["Frameworks"]
+
 - name: "[Inspect Cyber](https://ukgovernmentbeis.github.io/inspect_cyber/)"
   description: |
     Python package that streamlines the process of creating agentic cyber evaluations in Inspect.
@@ -16,21 +22,15 @@
   author: "[UK AISI](https://github.com/UKGovernmentBEIS/control-arena)"
   categories: ["Frameworks"]
 
-- name: "[Inspect SWE](https://meridianlabs-ai.github.io/inspect_swe/)"
-  description: |
-    Software engineering agents (Claude Code and Codex CLI) for Inspect.
-  author: "[Meridian](https://github.com/meridianlabs-ai/inspect_swe)"
-  categories: ["Suites & Agents"]
-
 - name: "[Inspect Scout](https://meridianlabs-ai.github.io/inspect_scout/)"
   description: |
-    Transcript analysis for Inspect evalutions.
+    Transcript analysis for Inspect evaluations.
   author: "[Meridian](https://github.com/meridianlabs-ai/inspect_scout)"
   categories: ["Analysis"]
 
 - name: "[Inspect Viz](https://meridianlabs-ai.github.io/inspect_viz/)"
   description: |
-    Interactive data visualization for Inspect evalutions.
+    Interactive data visualization for Inspect evaluations.
   author: "[Meridian](https://github.com/meridianlabs-ai/inspect_viz)"
   categories: ["Analysis"]
 
@@ -70,11 +70,17 @@
   author: "[Meridian](https://github.com/meridianlabs-ai/inspect-vscode)"
   categories: ["Tooling"]
 
+- name: "[Inspect Evals](https://ukgovernmentbeis.github.io/inspect_evals/)"
+  description: |
+    Community-contributed library of LLM evaluations covering safety, coding, reasoning, knowledge, and agent capabilities.
+  author: "[UK AISI](https://github.com/UKGovernmentBEIS/inspect_evals)"
+  categories: ["Evals"]
+
 - name: "[OpenBench](https://github.com/groq/openbench)"
   description: |
     Standardized, reproducible benchmarking for LLMs across 30+ evals.
   author: "[Groq](https://github.com/groq)"
-  categories: ["Suites & Agents"]
+  categories: ["Evals"]
 
 - name: "[k8s Sandbox](https://k8s-sandbox.aisi.org.uk/)"
   description: |
@@ -110,4 +116,4 @@
   description: |
     Run Harbor RL tasks with Inspect AI, with access to 40+ registry datasets including terminal-bench, replicationbench, and compilebench.
   author: "[Meridian](https://github.com/meridianlabs-ai/inspect_harbor)"
-  categories: ["Suites & Agents"]
+  categories: ["Evals"]

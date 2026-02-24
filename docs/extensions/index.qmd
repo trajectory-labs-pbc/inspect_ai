@@ -2,13 +2,13 @@
 title: "Inspect Extensions"
 aliases:
   - /integrations/index.html
+execute:
+  enabled: true
 ---
 
-```{=html}
-<style type="text/css">
-td:nth-child(1) { width: 155px; }
-td:nth-child(3) { width: 120px; }
-</style>
+```{python}
+#| output: asis
+#| echo: false
+exec(open("generate.py").read())
+print(open("extensions_content.md").read())
 ```
-
-{{< include extensions_content.md >}}
