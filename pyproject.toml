@@ -150,7 +150,6 @@ Documentation = "https://inspect.aisi.org.uk/"
 inspect = "inspect_ai._cli.main:main"
 
 [project.optional-dependencies]
-math = ["sympy"]
 dev = [
   "adlfs>=2025.8.0",
   "anthropic>=0.62.0",
@@ -185,6 +184,7 @@ dev = [
   "pytest-watcher",
   "pytest-xdist",
   "ruff==0.9.6",            # match version specified in .pre-commit-config.yaml
+  "sympy",
   "together",
   "textual-dev>=0.86.2",
   "trio",
