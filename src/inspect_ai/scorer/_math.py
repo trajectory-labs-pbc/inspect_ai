@@ -3,16 +3,8 @@
 from typing import TYPE_CHECKING, Any
 
 import regex
-import sympy
-from sympy import N
-from sympy.parsing.latex import parse_latex
-from sympy.parsing.sympy_parser import (
-    implicit_application,
-    implicit_multiplication_application,
-    parse_expr,
-    standard_transformations,
-)
 
+from inspect_ai._util.error import pip_dependency_error
 from inspect_ai.solver._task_state import TaskState
 
 from ._metric import CORRECT, INCORRECT, Score
@@ -670,264 +662,18 @@ def _preprocess_latex_for_sympify(text: str) -> str:
     return latex_str
 
 
-def _sympify_latex(latex_str: str) -> Any:
-    """Convert preprocessed LaTeX string to SymPy expression.
-
-    Args:
-        latex_str: Preprocessed LaTeX string.
-
-    Returns:
-        SymPy expression or None if conversion fails.
-    """
-    try:
-        if latex_str == "None":
-            return sympy.core.symbol.Symbol("None")
-        else:
-            transformations = standard_transformations + (
-                implicit_multiplication_application,
-                implicit_application,
-            )
-            latex_str = parse_expr(latex_str, transformations=transformations)
-            return sympy.sympify(
-                latex_str,
-                locals={  # type: ignore[arg-type]
-                    "binomial": sympy.binomial,
-                    "pi": sympy.pi,
-                    "E": sympy.E,
-                    "e": sympy.E,
-                    "I": sympy.I,
-                },
-            )
-    except Exception as e:
-        print(f"Couldn't parse {latex_str} with sympify: {e}")
-        return None
-
-
-def latex2sympy_fixed(latex: str) -> Any:
-    """Fallback parser using SymPy's native LaTeX parser.
-
-    Args:
-        latex: LaTeX string to parse.
-
-    Returns:
-        SymPy expression with constants replaced.
-    """
-    # Fix subscripts: _123 → _{123}
-    # Pattern: _([0-9]+)
-    # Explanation: Match underscore followed by digits without braces
-    #   - _         : Underscore (subscript in LaTeX)
-    #   - ([0-9]+)  : One or more digits
-    #   Example: "x_123" → "x_{123}"
-    latex = regex.sub(r"_([0-9]+)", r"_{\1}", latex)
-    latex_parsed = parse_latex(latex)
-    # replace constants like pi and e with their numerical value
-    known_constants: dict[str, Any] = {"pi": sympy.pi, "e": sympy.E, "I": 1j, "i": 1j}
-
-    # Replace any symbol in expr that is in our known_constants dictionary.
-    if latex_parsed is not None:
-        expr = latex_parsed.xreplace(
-            {
-                s: known_constants[s.name]
-                for s in latex_parsed.free_symbols
-                if s.name in known_constants
-            }
-        )
-        return expr
-    return latex_parsed
-
-
-def parse_primitives(text: str) -> Any:
-    """Parse mathematical text into SymPy expression.
-
-    Pipeline:
-    1. Try integer parsing
-    2. Try float parsing
-    3. Try sympify with LaTeX preprocessing (primary method)
-    4. Fall back to latex2sympy_fixed() (backup method)
-
-    Args:
-        text: Mathematical text to parse.
-
-    Returns:
-        Parsed expression (int, float, complex, or SymPy object) or None.
-    """
-    # Step 1: Try simple integer parsing
-    int_result = _parse_integer(text)
-    if int_result is not None:
-        return int_result
-
-    # Step 2: Try float parsing
-    float_result = _parse_float(text)
-    if float_result is not None:
-        return float_result
-
-    # Step 3: Try sympify with LaTeX preprocessing (primary method)
-    latex_str = _preprocess_latex_for_sympify(text)
-    sympy_result = _sympify_latex(latex_str)
-    if sympy_result is not None:
-        return sympy_result
-
-    # Step 4: Fall back to latex2sympy_fixed (backup method)
-    text_no_eq = text
-    try:
-        if "=" in text_no_eq:
-            # rfind is used to remove the last occurence of "="
-            text_no_eq = text_no_eq[text_no_eq.rfind("=") + 1 :]
-        output_val = latex2sympy_fixed(text_no_eq)
-
-        try:
-            float_val = float(N(output_val, 101))
-            if (
-                float_val.is_integer()
-                or float("inf") == float_val
-                or float("-inf") == float_val
-            ):
-                return int(
-                    N(latex2sympy_fixed(text_no_eq), 50001)
-                )  # important for large ints
-            return float_val
-        except:  # noqa: E722
-            try:
-                complex_val = complex(N(output_val, 101))
-                return complex_val
-            except:  # noqa: E722
-                return output_val
-    except Exception as e:
-        print(f"Error: Custom parsing error {e}, {text_no_eq}")
-        return None
-
-
 # ============================================================================
 # STAGE 5: COMPARISON
 # ============================================================================
 
-
-def check_answers(ans1: Any, ans2: Any) -> bool:
-    """Check if two parsed answers are mathematically equivalent.
-
-    Uses SymPy's equals() method when available, otherwise uses
-    approximate equality for numerical values.
-
-    Args:
-        ans1: First parsed answer.
-        ans2: Second parsed answer.
-
-    Returns:
-        True if answers are equivalent, False otherwise.
-    """
-
-    def _both_have_equals(a: Any, b: Any) -> bool:
-        return (
-            hasattr(a, "equals")
-            and callable(getattr(a, "equals"))
-            and hasattr(b, "equals")
-            and callable(getattr(b, "equals"))
-        )
-
-    def _approx_equal(ans1: Any, ans2: Any) -> bool:
-        err = abs(N(ans1 - ans2))
-        if err >= 1e-10:
-            return False
-        denom = max(abs(N(ans1)), abs(N(ans2)))
-        if denom < 1e-10:
-            return True
-        return err / denom < 1e-10
-
-    if ans1 is None or ans2 is None:
-        return False
-    if isinstance(ans1, list) != isinstance(ans2, list):
-        return False
-    if isinstance(ans1, list) and isinstance(ans2, list):
-        return False
-
-    try:
-        if _both_have_equals(ans1, ans2):
-            return bool(ans1.equals(ans2))  # type: ignore[union-attr]
-        if isinstance(ans1, str) or isinstance(ans2, str):
-            return ans1 == ans2
-        return _approx_equal(ans1, ans2)
-    except Exception:
-        return False
+# Note: Functions _sympify_latex, latex2sympy_fixed, parse_primitives,
+# check_answers, parse_answer, and extract_answer are defined within the
+# math() scorer function below since they require the sympy optional dependency.
 
 
 # ============================================================================
 # PUBLIC API
 # ============================================================================
-
-
-def parse_answer(text: str) -> Any:
-    """Parse a mathematical answer string into a SymPy expression.
-
-    Pipeline: Normalization → Parsing
-
-    Args:
-        text: Mathematical text to parse.
-
-    Returns:
-        Parsed expression or None.
-    """
-    text_normalized_1 = remove_invalid_characters(text)
-    text_normalized_2 = remove_outer_brackets(normalize_string(text_normalized_1))
-    answer = parse_primitives(text_normalized_2)
-    return answer
-
-
-def extract_answer(text: str) -> Any:
-    """Extract and parse the final answer from model output.
-
-    Pipeline: Preprocessing → Extraction → Normalization → Parsing
-
-    Args:
-        text: Raw model output text.
-
-    Returns:
-        Parsed answer or None.
-    """
-    text_normalized = replace_unicode(text)
-
-    # Try to extract boxed content first
-    answer = find_last_boxed_content(text_normalized)
-
-    # If no boxed content, use the full text
-    if answer is None:
-        answer = text_normalized
-
-    # Check for multiple equals signs (ambiguous)
-    if answer.count("=") > 1:
-        print(f"Warning: more than one '=' in answer {answer}")
-        return None
-
-    # Try to parse the extracted/normalized answer
-    parsed_answer = parse_answer(answer)
-
-    # If parsing succeeded, validate it's not nonsense
-    if parsed_answer is not None:
-        # Check if the result contains unexpected free symbols (variables)
-        # Expected symbols: I (imaginary unit), pi, E (Euler's number)
-        # If we have other symbols, it's likely garbage from parsing plain text
-        if hasattr(parsed_answer, "free_symbols"):
-            unexpected_symbols = {
-                s.name
-                for s in parsed_answer.free_symbols
-                if s.name not in {"I", "pi", "E", "e"}
-            }
-            # If there are unexpected symbols, the parser interpreted
-            # plain text as variables (e.g., "The answer is 42" → T*h*e*...)
-            # In this case, reject the parse and fall back to integer extraction
-            if not unexpected_symbols:
-                return parsed_answer
-        else:
-            # No free symbols (it's a number), return it
-            return parsed_answer
-
-    # Fallback 1: Try to extract integer from the answer string
-    integer_from_answer = extract_last_integer(answer)
-    if integer_from_answer is not None:
-        return integer_from_answer
-
-    # Fallback 2: Try to extract integer from the full normalized text
-    # (in case the answer extraction was too restrictive)
-    return extract_last_integer(text_normalized)
 
 
 @scorer(metrics=[accuracy(), stderr()])
@@ -940,6 +686,267 @@ def math() -> Scorer:
     Returns:
         Scorer function for evaluating mathematical answers.
     """
+    try:
+        import sympy
+        from sympy import N
+        from sympy.parsing.latex import parse_latex
+        from sympy.parsing.sympy_parser import (
+            implicit_application,
+            implicit_multiplication_application,
+            parse_expr,
+            standard_transformations,
+        )
+    except ImportError:
+        raise pip_dependency_error("math() scorer", ["sympy"]) from None
+
+    def _sympify_latex(latex_str: str) -> Any:
+        """Convert preprocessed LaTeX string to SymPy expression.
+
+        Args:
+            latex_str: Preprocessed LaTeX string.
+
+        Returns:
+            SymPy expression or None if conversion fails.
+        """
+        try:
+            if latex_str == "None":
+                return sympy.core.symbol.Symbol("None")
+            else:
+                transformations = standard_transformations + (
+                    implicit_multiplication_application,
+                    implicit_application,
+                )
+                latex_str = parse_expr(latex_str, transformations=transformations)
+                return sympy.sympify(
+                    latex_str,
+                    locals={  # type: ignore[arg-type]
+                        "binomial": sympy.binomial,
+                        "pi": sympy.pi,
+                        "E": sympy.E,
+                        "e": sympy.E,
+                        "I": sympy.I,
+                    },
+                )
+        except Exception as e:
+            print(f"Couldn't parse {latex_str} with sympify: {e}")
+            return None
+
+    def latex2sympy_fixed(latex: str) -> Any:
+        """Fallback parser using SymPy's native LaTeX parser.
+
+        Args:
+            latex: LaTeX string to parse.
+
+        Returns:
+            SymPy expression with constants replaced.
+        """
+        # Fix subscripts: _123 → _{123}
+        # Pattern: _([0-9]+)
+        # Explanation: Match underscore followed by digits without braces
+        #   - _         : Underscore (subscript in LaTeX)
+        #   - ([0-9]+)  : One or more digits
+        #   Example: "x_123" → "x_{123}"
+        latex = regex.sub(r"_([0-9]+)", r"_{\1}", latex)
+        latex_parsed = parse_latex(latex)
+        # replace constants like pi and e with their numerical value
+        known_constants: dict[str, Any] = {
+            "pi": sympy.pi,
+            "e": sympy.E,
+            "I": 1j,
+            "i": 1j,
+        }
+
+        # Replace any symbol in expr that is in our known_constants dictionary.
+        if latex_parsed is not None:
+            expr = latex_parsed.xreplace(
+                {
+                    s: known_constants[s.name]
+                    for s in latex_parsed.free_symbols
+                    if s.name in known_constants
+                }
+            )
+            return expr
+        return latex_parsed
+
+    def parse_primitives(text: str) -> Any:
+        """Parse mathematical text into SymPy expression.
+
+        Pipeline:
+        1. Try integer parsing
+        2. Try float parsing
+        3. Try sympify with LaTeX preprocessing (primary method)
+        4. Fall back to latex2sympy_fixed() (backup method)
+
+        Args:
+            text: Mathematical text to parse.
+
+        Returns:
+            Parsed expression (int, float, complex, or SymPy object) or None.
+        """
+        # Step 1: Try simple integer parsing
+        int_result = _parse_integer(text)
+        if int_result is not None:
+            return int_result
+
+        # Step 2: Try float parsing
+        float_result = _parse_float(text)
+        if float_result is not None:
+            return float_result
+
+        # Step 3: Try sympify with LaTeX preprocessing (primary method)
+        latex_str = _preprocess_latex_for_sympify(text)
+        sympy_result = _sympify_latex(latex_str)
+        if sympy_result is not None:
+            return sympy_result
+
+        # Step 4: Fall back to latex2sympy_fixed (backup method)
+        text_no_eq = text
+        try:
+            if "=" in text_no_eq:
+                # rfind is used to remove the last occurence of "="
+                text_no_eq = text_no_eq[text_no_eq.rfind("=") + 1 :]
+            output_val = latex2sympy_fixed(text_no_eq)
+
+            try:
+                float_val = float(N(output_val, 101))
+                if (
+                    float_val.is_integer()
+                    or float("inf") == float_val
+                    or float("-inf") == float_val
+                ):
+                    return int(
+                        N(latex2sympy_fixed(text_no_eq), 50001)
+                    )  # important for large ints
+                return float_val
+            except:  # noqa: E722
+                try:
+                    complex_val = complex(N(output_val, 101))
+                    return complex_val
+                except:  # noqa: E722
+                    return output_val
+        except Exception as e:
+            print(f"Error: Custom parsing error {e}, {text_no_eq}")
+            return None
+
+    def check_answers(ans1: Any, ans2: Any) -> bool:
+        """Check if two parsed answers are mathematically equivalent.
+
+        Uses SymPy's equals() method when available, otherwise uses
+        approximate equality for numerical values.
+
+        Args:
+            ans1: First parsed answer.
+            ans2: Second parsed answer.
+
+        Returns:
+            True if answers are equivalent, False otherwise.
+        """
+
+        def _both_have_equals(a: Any, b: Any) -> bool:
+            return (
+                hasattr(a, "equals")
+                and callable(getattr(a, "equals"))
+                and hasattr(b, "equals")
+                and callable(getattr(b, "equals"))
+            )
+
+        def _approx_equal(ans1: Any, ans2: Any) -> bool:
+            err = abs(N(ans1 - ans2))
+            if err >= 1e-10:
+                return False
+            denom = max(abs(N(ans1)), abs(N(ans2)))
+            if denom < 1e-10:
+                return True
+            return err / denom < 1e-10
+
+        if ans1 is None or ans2 is None:
+            return False
+        if isinstance(ans1, list) != isinstance(ans2, list):
+            return False
+        if isinstance(ans1, list) and isinstance(ans2, list):
+            return False
+
+        try:
+            if _both_have_equals(ans1, ans2):
+                return bool(ans1.equals(ans2))  # type: ignore[union-attr]
+            if isinstance(ans1, str) or isinstance(ans2, str):
+                return ans1 == ans2
+            return _approx_equal(ans1, ans2)
+        except Exception:
+            return False
+
+    def parse_answer(text: str) -> Any:
+        """Parse a mathematical answer string into a SymPy expression.
+
+        Pipeline: Normalization → Parsing
+
+        Args:
+            text: Mathematical text to parse.
+
+        Returns:
+            Parsed expression or None.
+        """
+        text_normalized_1 = remove_invalid_characters(text)
+        text_normalized_2 = remove_outer_brackets(normalize_string(text_normalized_1))
+        answer = parse_primitives(text_normalized_2)
+        return answer
+
+    def extract_answer(text: str) -> Any:
+        """Extract and parse the final answer from model output.
+
+        Pipeline: Preprocessing → Extraction → Normalization → Parsing
+
+        Args:
+            text: Raw model output text.
+
+        Returns:
+            Parsed answer or None.
+        """
+        text_normalized = replace_unicode(text)
+
+        # Try to extract boxed content first
+        answer = find_last_boxed_content(text_normalized)
+
+        # If no boxed content, use the full text
+        if answer is None:
+            answer = text_normalized
+
+        # Check for multiple equals signs (ambiguous)
+        if answer.count("=") > 1:
+            print(f"Warning: more than one '=' in answer {answer}")
+            return None
+
+        # Try to parse the extracted/normalized answer
+        parsed_answer = parse_answer(answer)
+
+        # If parsing succeeded, validate it's not nonsense
+        if parsed_answer is not None:
+            # Check if the result contains unexpected free symbols (variables)
+            # Expected symbols: I (imaginary unit), pi, E (Euler's number)
+            # If we have other symbols, it's likely garbage from parsing plain text
+            if hasattr(parsed_answer, "free_symbols"):
+                unexpected_symbols = {
+                    s.name
+                    for s in parsed_answer.free_symbols
+                    if s.name not in {"I", "pi", "E", "e"}
+                }
+                # If there are unexpected symbols, the parser interpreted
+                # plain text as variables (e.g., "The answer is 42" → T*h*e*...)
+                # In this case, reject the parse and fall back to integer extraction
+                if not unexpected_symbols:
+                    return parsed_answer
+            else:
+                # No free symbols (it's a number), return it
+                return parsed_answer
+
+        # Fallback 1: Try to extract integer from the answer string
+        integer_from_answer = extract_last_integer(answer)
+        if integer_from_answer is not None:
+            return integer_from_answer
+
+        # Fallback 2: Try to extract integer from the full normalized text
+        # (in case the answer extraction was too restrictive)
+        return extract_last_integer(text_normalized)
 
     async def score(state: TaskState, target: Target) -> Score:
         result = extract_answer(state.output.completion)
