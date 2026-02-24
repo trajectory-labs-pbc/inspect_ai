@@ -1,4 +1,4 @@
-## Unreleased
+## 0.3.182 (24 February 2026)
 
 - AzureAI: Pass `max_completion_tokens` to gpt-5 and o-series models.
 - Events: Add timeline functions for providing additional structure for event viewing and traversal.
