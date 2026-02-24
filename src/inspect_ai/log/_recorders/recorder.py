@@ -1,6 +1,7 @@
 import abc
-from typing import IO, Literal
+from typing import IO
 
+from inspect_ai._util.asyncfiles import AsyncFilesystem
 from inspect_ai._util.error import EvalError
 from inspect_ai.log._log import (
     EvalLog,
@@ -11,6 +12,7 @@ from inspect_ai.log._log import (
     EvalSampleSummary,
     EvalSpec,
     EvalStats,
+    EvalStatus,
 )
 
 
@@ -24,7 +26,7 @@ class Recorder(abc.ABC):
     def handles_bytes(cls, first_bytes: bytes) -> bool: ...
 
     @abc.abstractmethod
-    def default_log_buffer(self, sample_count: int) -> int: ...
+    def default_log_buffer(self, sample_count: int, high_throughput: bool) -> int: ...
 
     @abc.abstractmethod
     def is_writeable(self) -> bool: ...
@@ -45,7 +47,7 @@ class Recorder(abc.ABC):
     async def log_finish(
         self,
         eval: EvalSpec,
-        status: Literal["started", "success", "cancelled", "error"],
+        status: EvalStatus,
         stats: EvalStats,
         results: EvalResults | None,
         reductions: list[EvalSampleReductions] | None,
@@ -56,7 +58,12 @@ class Recorder(abc.ABC):
 
     @classmethod
     @abc.abstractmethod
-    async def read_log(cls, location: str, header_only: bool = False) -> EvalLog: ...
+    async def read_log(
+        cls,
+        location: str,
+        header_only: bool = False,
+        async_fs: AsyncFilesystem | None = None,
+    ) -> EvalLog: ...
 
     @classmethod
     @abc.abstractmethod
@@ -78,7 +85,7 @@ class Recorder(abc.ABC):
     @classmethod
     @abc.abstractmethod
     async def read_log_sample_summaries(
-        cls, location: str
+        cls, location: str, async_fs: AsyncFilesystem | None = None
     ) -> list[EvalSampleSummary]: ...
 
     @classmethod

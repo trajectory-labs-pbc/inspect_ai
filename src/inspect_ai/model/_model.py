@@ -49,6 +49,7 @@ from inspect_ai._util.content import (
     ContentText,
     ContentVideo,
 )
+from inspect_ai._util.error import exception_message
 from inspect_ai._util.logger import warn_once
 from inspect_ai._util.notgiven import NOT_GIVEN, NotGiven
 from inspect_ai._util.platform import platform_init
@@ -59,9 +60,9 @@ from inspect_ai._util.registry import (
     registry_unqualified_name,
 )
 from inspect_ai._util.retry import report_http_retry
+from inspect_ai._util.rich import format_traceback
 from inspect_ai._util.trace import trace_action
 from inspect_ai._util.working import report_sample_waiting_time, sample_working_time
-from inspect_ai.model._reasoning import reasoning_to_think_tag
 from inspect_ai.model._retry import model_retry_config
 from inspect_ai.tool import Tool, ToolChoice, ToolFunction, ToolInfo
 from inspect_ai.tool._mcp._remote import is_mcp_server_tool
@@ -70,8 +71,10 @@ from inspect_ai.tool._tool_call import ToolCallModelInputHints
 from inspect_ai.tool._tool_def import ToolDef, tool_defs
 from inspect_ai.util import concurrency
 from inspect_ai.util._limit import (
+    check_cost_limit,
     check_message_limit,
     check_token_limit,
+    record_model_cost,
     record_model_usage,
 )
 
@@ -99,7 +102,8 @@ from ._generate_config import (
     active_generate_config,
     set_active_generate_config,
 )
-from ._model_call import ModelCall
+from ._model_call import ModelCall, as_error_response
+from ._model_data.model_data import ModelCost
 from ._model_output import ModelOutput, ModelUsage
 from ._tokens import count_media_tokens, count_text_tokens, count_tokens
 
@@ -120,17 +124,6 @@ class GenerateInput(NamedTuple):
 
     config: GenerateConfig
     """Model configuration."""
-
-
-GenerateFilter: TypeAlias = Callable[
-    [str, list[ChatMessage], list[ToolInfo], ToolChoice | None, GenerateConfig],
-    Awaitable[ModelOutput | GenerateInput | None],
-]
-"""Filter a model generation.
-
-A filter may substitute for the default model generation by returning a
-`ModelOutput`, modify the input parameters by returning a `GenerateInput`, or return `None` to allow default processing to continue.
-"""
 
 
 class ModelAPI(abc.ABC):
@@ -242,7 +235,11 @@ class ModelAPI(abc.ABC):
         """
         ...
 
-    async def count_tokens(self, input: str | list[ChatMessage]) -> int:
+    async def count_tokens(
+        self,
+        input: str | list[ChatMessage],
+        config: GenerateConfig | None = None,
+    ) -> int:
         """Estimate token count for input.
 
         This default implementation uses character-based heuristics for text
@@ -252,6 +249,8 @@ class ModelAPI(abc.ABC):
 
         Args:
             input: Input to count tokens for.
+            config: Optional generation config for provider-specific counting
+                (e.g., reasoning parameters that affect token allocation).
         """
         if isinstance(input, str):
             return await self.count_text_tokens(input)
@@ -353,10 +352,6 @@ class ModelAPI(abc.ABC):
         """Some models do not support truncation of computer screenshots."""
         return False
 
-    def emulate_reasoning_history(self) -> bool:
-        """Chat message assistant messages with reasoning should playback reasoning with emulation (.e.g. <think> tags)"""
-        return True
-
     def force_reasoning_history(self) -> Literal["none", "all", "last"] | None:
         """Force a specific reasoning history behavior for this provider."""
         return None
@@ -368,6 +363,39 @@ class ModelAPI(abc.ABC):
     def compact_reasoning_history(self) -> bool:
         """Is reasoning history eligible for compation for this provider?"""
         return True
+
+    async def compact(
+        self,
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        config: GenerateConfig,
+        instructions: str | None = None,
+    ) -> tuple[list[ChatMessage], ModelUsage | None]:
+        """Compact messages using provider-native compaction.
+
+        Some model providers (e.g., OpenAI Codex models) support native context
+        compaction, which reduces the token count of a conversation while preserving
+        semantic meaning. This is useful for long conversations that approach the
+        context window limit.
+
+        Args:
+            input: Chat message input (if a `str` is passed it is converted to a `ChatUserMessage`).
+            tools: Tools available for the model to call.
+            config: Model configuration.
+            instructions: Additional instructions to give the model about compaction
+                (e.g. "Focus on preserving code snippets, variable names, and technical decisions.")
+
+        Returns:
+            A tuple of (compacted_messages, usage) where compacted_messages is a
+            list containing a single message with compaction metadata, and usage
+            contains token counts for the compaction operation.
+
+        Raises:
+            NotImplementedError: For providers without native compaction support.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support native compaction."
+        )
 
 
 class Model:
@@ -406,6 +434,7 @@ class Model:
         self.config = config
         self.model_args = model_args if model_args is not None else {}
         self._role: str | None = None
+        self._explicit_base_url: str | None = None
 
         # state indicating whether our lifetime is bound by a context manager
         self._context_bound = False
@@ -450,6 +479,11 @@ class Model:
     def canonical_name(self) -> str:
         """Canonical model name for model info database lookup."""
         return self.api.canonical_name()
+
+    @property
+    def explicit_base_url(self) -> str | None:
+        """Base URL explicitly provided by the user (not resolved from env/defaults)."""
+        return self._explicit_base_url
 
     @property
     def role(self) -> str | None:
@@ -501,26 +535,8 @@ class Model:
         conversation_length = len(input) if isinstance(input, list) else 1
         check_message_limit(conversation_length, raise_for_equal=True)
 
-        # base config for this model
-        base_config = self.config
-
-        # if we are the active_model then merge active generate config
-        active_config = active_generate_config()
-        if is_active_model:
-            base_config = base_config.merge(active_config)
-
-        ## otherwise merge connection-oriented config
-        else:
-            base_config = base_config.merge(
-                GenerateConfig(
-                    max_connections=active_config.max_connections,
-                    max_retries=active_config.max_retries,
-                    timeout=active_config.timeout,
-                )
-            )
-
-        # merge passed config
-        config = base_config.merge(config)
+        # resolve config
+        config = self._resolve_config(config)
 
         # resolve cache (prefer arg, fall back to config)
         if isinstance(cache, NotGiven):
@@ -630,12 +646,19 @@ class Model:
             else:
                 return messages[len(input) :], output
 
-    async def count_tokens(self, input: str | list[ChatMessage]) -> int:
+    async def count_tokens(
+        self,
+        input: str | list[ChatMessage],
+        config: GenerateConfig | None = None,
+    ) -> int:
         """Estimate token count for input.
 
         Args:
            input: Input to count tokens for.
+           config: Optional generation config for provider-specific counting
+               (e.g., reasoning parameters that affect token allocation).
         """
+        config = self._resolve_config(config)
         model_name = ModelName(self)
         key = f"ModelCountTokens({self.api.connection_key()})"
         async with concurrency(f"{model_name}_count_tokens", 10, key, visible=False):
@@ -652,11 +675,13 @@ class Model:
                     self.api.retry_wait(),
                 )
             )
-            async def _count_tokens(input: str | list[ChatMessage]) -> int:
-                return await self.api.count_tokens(input)
+            async def _count_tokens(
+                input: str | list[ChatMessage], config: GenerateConfig | None
+            ) -> int:
+                return await self.api.count_tokens(input, config)
 
             # count tokens
-            return await _count_tokens(input)
+            return await _count_tokens(input, config)
 
     async def count_tool_tokens(self, tools: Sequence[ToolInfo]) -> int:
         """Count tokens for tool definitions.
@@ -681,6 +706,70 @@ class Model:
                 }
             )
         return await self.count_tokens([ChatMessageUser(content=tool_json)])
+
+    async def compact(
+        self,
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        instructions: str | None = None,
+    ) -> tuple[list[ChatMessage], ModelUsage | None]:
+        """Compact messages using provider-native compaction.
+
+        Delegates to the model provider's native compaction API when available.
+        Automatically tracks token usage and enforces token limits.
+
+        Args:
+          input: Chat message input (if a `str` is passed it is converted to a `ChatUserMessage`).
+          tools: Tools available for the model to call.
+          config: Model configuration.
+          instructions: Additional instructions to give the model about compaction
+               (e.g. "Focus on preserving code snippets, variable names, and technical decisions.")
+
+        Returns:
+          A tuple of (compacted_messages, usage) where compacted_messages is
+          a list of compacted messages and usage contains token counts.
+
+        Raises:
+            NotImplementedError: For providers without native compaction support.
+        """
+        config = self._resolve_config(None)
+
+        # provide max_tokens from the model api if required (same as generate)
+        if config.max_tokens is None:
+            config.max_tokens = self.api.max_tokens_for_config(config)
+            if config.max_tokens is None:
+                config.max_tokens = self.api.max_tokens()
+
+        model_name = ModelName(self)
+        key = f"ModelCompact({self.api.connection_key()})"
+
+        async with concurrency(f"{model_name}_compact", 10, key, visible=False):
+
+            @retry(
+                **model_retry_config(
+                    self.api.model_name,
+                    self.config.max_retries,
+                    self.config.timeout,
+                    self.should_retry,
+                    self.before_retry,
+                    log_model_retry,
+                    report_sample_waiting_time,
+                    self.api.retry_wait(),
+                )
+            )
+            async def _compact(
+                messages: list[ChatMessage],
+            ) -> tuple[list[ChatMessage], ModelUsage | None]:
+                return await self.api.compact(messages, tools, config, instructions)
+
+            # Call compact with retry handling
+            compacted_messages, usage = await _compact(input)
+
+            # Record and check usage
+            if usage:
+                record_and_check_model_usage(f"{self}", usage)
+
+            return compacted_messages, usage
 
     async def _generate(
         self,
@@ -862,7 +951,10 @@ class Model:
                             and timeout_cm.cancel_called
                         ):
                             raise AttemptTimeoutError(config.attempt_timeout)
-
+                except Exception as ex:
+                    # Mark event as failed for uncaught provider exceptions
+                    complete(ex, None)
+                    raise
                 finally:
                     time_elapsed = time.monotonic() - time_start
 
@@ -880,7 +972,7 @@ class Model:
                 # request which caused the error
                 error = repr(output)
                 request = json.dumps(call.request, indent=2) if call is not None else ""
-                error_message = f"{error}\n\nRequest:\n{request}"
+                error_message = f"\nRequest:\n{request}\n\n{error}"
                 raise RuntimeError(error_message)
 
             # update output with time (call.time captures time spent
@@ -900,7 +992,6 @@ class Model:
 
             # record usage
             if output.usage:
-                # record usage
                 record_and_check_model_usage(f"{self}", output.usage)
 
                 # send telemetry to hooks
@@ -1017,6 +1108,28 @@ class Model:
         ):
             yield
 
+    def _resolve_config(self, config: GenerateConfig | None) -> GenerateConfig:
+        # base config for this model
+        base_config = self.config
+
+        # if we are the active_model then merge active generate config
+        active_config = active_generate_config()
+        if self == active_model():
+            base_config = base_config.merge(active_config)
+
+        # otherwise merge connection-oriented config so its inherited everywhere
+        else:
+            base_config = base_config.merge(
+                GenerateConfig(
+                    max_connections=active_config.max_connections,
+                    max_retries=active_config.max_retries,
+                    timeout=active_config.timeout,
+                )
+            )
+
+        # merge passed config
+        return base_config.merge(config or GenerateConfig())
+
     def _record_model_interaction(
         self,
         input: list[ChatMessage],
@@ -1026,7 +1139,10 @@ class Model:
         cache: Literal["read", "write"] | None,
         output: ModelOutput | None = None,
         call: ModelCall | None = None,
-    ) -> tuple[Callable[[ModelOutput | Exception, ModelCall | None], None], BaseModel]:
+    ) -> tuple[
+        Callable[[ModelOutput | Exception, ModelCall | None], None],
+        BaseModel,
+    ]:
         from inspect_ai.event._model import ModelEvent
         from inspect_ai.log._transcript import transcript
 
@@ -1057,9 +1173,30 @@ class Model:
                 event.output = result
             else:
                 display_conversation_assistant_error(result)
-                event.error = repr(result)
+                event.error = exception_message(result)
+                traceback_text, traceback_ansi = format_traceback(
+                    type(result), result, result.__traceback__
+                )
+                event.traceback = traceback_text
+                event.traceback_ansi = traceback_ansi
 
-            event.call = updated_call
+            if updated_call is not None:
+                event.call = updated_call
+
+            if (
+                isinstance(result, Exception)
+                and event.call is not None
+                and event.call.response is None
+            ):
+                # We try to set these in the individual providers' error handling, but we make a last
+                # ditch effort here to set them if we don't have a response.
+                if hasattr(result, "body"):
+                    event.call.response = as_error_response(result.body)
+                elif hasattr(result, "response"):
+                    event.call.response = as_error_response(result.response)
+                else:
+                    event.call.response = as_error_response(str(result))
+
             event.pending = None
             transcript()._event_updated(event)
 
@@ -1068,6 +1205,31 @@ class Model:
             complete(output, call)
 
         return complete, event
+
+
+ModelGenerateFilter: TypeAlias = Callable[
+    [Model, list[ChatMessage], list[ToolInfo], ToolChoice | None, GenerateConfig],
+    Awaitable[ModelOutput | GenerateInput | None],
+]
+"""Filter that receives the resolved ``Model`` instance as its first argument."""
+
+StrGenerateFilter: TypeAlias = Callable[
+    [str, list[ChatMessage], list[ToolInfo], ToolChoice | None, GenerateConfig],
+    Awaitable[ModelOutput | GenerateInput | None],
+]
+"""Deprecated filter that receives a model name ``str`` as its first argument."""
+
+GenerateFilter: TypeAlias = ModelGenerateFilter | StrGenerateFilter
+"""Filter a model generation.
+
+The first argument is the resolved ``Model`` instance.  Filters that
+accept a ``str`` as the first argument are still supported but
+deprecated and will receive ``model.name`` instead.
+
+A filter may substitute for the default model generation by returning a
+``ModelOutput``, modify the input parameters by returning a ``GenerateInput``,
+or return ``None`` to allow default processing to continue.
+"""
 
 
 class AttemptTimeoutError(RuntimeError):
@@ -1220,7 +1382,7 @@ def get_model(
             model = model.split(",")[0]
         else:
             raise ValueError(
-                "No model specified (and no model environment varible defined)"
+                "No model specified (and no model environment variable defined)"
             )
 
     # see if we can return a memoized model instance
@@ -1273,6 +1435,7 @@ def get_model(
             **model_args,
         )
         m = Model(modelapi_instance, config, model_args)
+        m._explicit_base_url = base_url
         if role is not None:
             m._set_role(role)
         if memoize:
@@ -1438,25 +1601,6 @@ def resolve_reasoning_history(
 
         # reverse them back
         resolved_messages.reverse()
-
-    # api can't represent reasoning natively so emulate it
-    if model_api.emulate_reasoning_history():
-        emulated_messages: list[ChatMessage] = []
-        for message in resolved_messages:
-            if isinstance(message, ChatMessageAssistant) and isinstance(
-                message.content, list
-            ):
-                content: list[Content] = []
-                for c in message.content:
-                    if isinstance(c, ContentReasoning):
-                        content.append(ContentText(text=reasoning_to_think_tag(c)))
-                    else:
-                        content.append(c)
-                message = message.model_copy(update={"content": content})
-
-            emulated_messages.append(message)
-
-        resolved_messages = emulated_messages
 
     # return messages
     return resolved_messages
@@ -1736,20 +1880,36 @@ def init_sample_model_usage() -> None:
 
 
 def record_and_check_model_usage(model: str, usage: ModelUsage) -> None:
-    from inspect_ai.log._samples import set_active_sample_total_tokens
+    from inspect_ai.log._samples import (
+        set_active_sample_total_cost,
+        set_active_sample_total_tokens,
+    )
+    from inspect_ai.model._model_info import get_model_info
+
+    # compute cost and set on usage before recording (so ModelUsage.__add__
+    # accumulates it in the per-model usage dicts)
+    info = get_model_info(model)
+    total_cost: float | None = None
+    # Note that we handle info=None here because None is currently a valid output of get_model_info (e.g. for mock models)
+    if info is not None and info.cost is not None:
+        total_cost = compute_model_cost(info.cost, usage)
+        usage.total_cost = total_cost
 
     # record usage
     set_model_usage(model, usage, sample_model_usage_context_var.get(None))
     set_model_usage(model, usage, model_usage_context_var.get(None))
     record_model_usage(usage)
 
-    # compute total tokens
+    # compute total tokens and update active sample
     total_tokens = sample_total_tokens()
-
-    # update active sample
     set_active_sample_total_tokens(total_tokens)
-
     check_token_limit()
+
+    # record cost to limit tree and check
+    if total_cost is not None:
+        record_model_cost(total_cost)
+        set_active_sample_total_cost(sample_total_cost())
+        check_cost_limit()
 
 
 def set_model_usage(
@@ -1782,3 +1942,33 @@ def sample_total_tokens() -> int:
 sample_model_usage_context_var: ContextVar[dict[str, ModelUsage]] = ContextVar(
     "sample_model_usage", default={}
 )
+
+
+def compute_model_cost(cost_data: ModelCost, usage: ModelUsage) -> float:
+    """Compute cost for a model call based on usage and cost data.
+
+    Args:
+        cost_data: Per-token pricing for the model.
+        usage: Token counts for the call.
+
+    Returns:
+        Cost in dollars.
+    """
+    cost = usage.input_tokens * cost_data.input / 1_000_000
+    cost += usage.output_tokens * cost_data.output / 1_000_000
+
+    if usage.input_tokens_cache_write is not None:
+        cost += usage.input_tokens_cache_write * cost_data.input_cache_write / 1_000_000
+    if usage.input_tokens_cache_read is not None:
+        cost += usage.input_tokens_cache_read * cost_data.input_cache_read / 1_000_000
+
+    return cost
+
+
+def sample_total_cost() -> float:
+    """Get total cost across all models for the current sample."""
+    return sum(
+        usage.total_cost
+        for usage in sample_model_usage().values()
+        if usage.total_cost is not None
+    )

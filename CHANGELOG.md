@@ -1,5 +1,155 @@
-## Unreleased
+## 0.3.182 (24 February 2026)
 
+- AzureAI: Pass `max_completion_tokens` to gpt-5 and o-series models.
+- Events: Add timeline functions for providing additional structure for event viewing and traversal.
+- Inspect View: Add support for downloading sample JSON.
+
+## 0.3.181 (23 February 2026)
+
+- Hooks: New `on_sample_init()` hook that fires before sandbox environments are created, enabling hooks to gate sandbox resource provisioning.
+- Model API: Add `content_list` property to `ChatMessage` for consistent access to content as a list.
+- OpenAI Compatible: Send `max_completion_tokens` when interacting with gpt-5 or o-series models.
+- Anthropic: Use `output_config` directly (rather than via `extra_body`) which is compatible with batch mode.
+- Google: Add latest Gemini models to model info database.
+- Sandboxes: Verify execute result size automatically for all sandbox exec calls.
+- Sandboxes: Export `exec_remote()` types from root namespace and add docs.
+- Eval Set: Add `TASK_IDENTIFIER_VERSION` to support persistence of task identifiers in inspect_flow.
+- Eval Retry: Don't retry with `model_base_url` unless it was explicitly specified by the user.
+- Scoring: Don't use task level metric overrides when appending scores to an existing log.
+- Agent Bridge: Add model_aliases to agent bridge and pass Model to GenerateFilter.
+- Dependencies: Update to nest-asyncio2 v1.7.2 to address anyio threading issue.
+- Inspect View: Display all non-undefined edited score values.
+- Bugfix: Don't reuse eval_set logs when `sample_shuffle` changes and `limit` constrains sample selection.
+- Bugfix: `eval_set` now correctly handles pending tasks and incomplete tasks (e.g. limit/epoch changes) in a single pass, instead of skipping incomplete tasks when new tasks were present.
+- Bugfix: Reuse S3 clients in log recorders to fix session leak.
+- Bugfix: Create eval set bundle even when all logs are already complete.
+- Bugfix: Fix `epochs_changed` false positives in `eval_set` caused by comparing reducer closure `__name__` instead of registry log name.
+- Bugfix: Fix async ZIP parser crash on valid `.eval` files whose compressed data contained a false ZIP64 EOCD Locator signature.
+- Bugfix: Skip non-JSON lines in MCP server stdout parsing,
+- Bugfix: Remove doubled MIME prefix in MCP content conversion.
+- Bugfix: Ensure that `eval()` specified `model_roles` override task-level roles.
+- Bugfix: Improve max sample size error.
+
+## 0.3.180 (20 February 2026)
+
+- Agent Bridge: Google Gemini API is now supported for in-process and sandbox bridges.
+- Task Execution: Cancelled samples are now logged in the same fashion as samples with errors.
+- Anthropic: Increase max_tokens caps for Claude 4.5 and 4.6 models.
+- Anthropic: Update to new sdk types released with Sonnet 4.6 (v0.80.0 of `anthropic` package is now required).
+- Anthropic: Remove uses of Sonnet 3.7 from tests (no longer available).
+- Hugging Face: More flexible control over application of chat templates (enables support for generation from base models).
+- VLLM: Don't retry when the error indicates that the VLLM server has crashed.
+- Analysis: Async reading of logs/samples in `samples_df()` (now 50x faster).
+- Sandboxes: Don't require Docker compatible sandboxes to implement `config_deserialize()`.
+- Sandboxes: New `exec_remote()` method for async execution of long-running commands.
+- Compaction: Add `type` field to `CompactionEvent` to record compaction type.
+- Web Search: Treat Tavily query character limits as ToolErrors.
+- Limits: New `cost_limit()` context manager for scoped application of cost limits.
+- Performance: Disable expensive per-sample options when running high-throughput workloads.
+- Events: Rename `EventNode` to `EventTreeNode` and `SpanNode` to `EventTreeSpan` (old type names will still work at runtime with a deprecation warning).
+- Inspect View: Make samples in task detail sortable, inline epoch filter, show sample status.
+- Bugfix: Shield sandbox cleanup after cancelled exception.
+- Bugfix: Protect against leading zero-width characters when printing tool output to the terminal.
+- Bugfix: Google batch JSONL serialization now correctly nests generation config fields (e.g. `thinking_config`) under `generation_config` in the REST schema.
+- Bugfix: Google batch polling no longer hangs forever when a batch job reaches `EXPIRED` or `PARTIALLY_SUCCEEDED` state.
+
+## 0.3.179 (12 February 2026)
+
+- Bugfix: Fix shutdown hang by draining nest_asyncio event loop.
+- Bugfix: Fix regression in live sample display in Inspect View.
+
+## 0.3.178 (11 February 2026)
+
+- Google: Hard failure for quota exceeded errors with `limit: 0` (indicating the model or feature is fully restricted).
+- Compaction: Improve token counting by using input tokens reported from call to `generate()`.
+- Model API: for 400 errors, print the error after the request payload rather than before.
+- Eval Logs: Add progress callback interface for reading eval logs
+- Sandboxes: Added `http_proxy` example for intercepting and remapping HTTP requests from agents using mitmproxy.
+- Inspect View: Fix regression in log viewer navigation in VSCode.
+- Inspect View: Improve transcript display appearance in VSCode.
+- Inspect View: Improve log events display in transcripts.
+- Bugfix: Fix off-by-one in `_read_all_summaries` that skipped the last sample summary.
+
+## 0.3.177 (10 February 2026)
+
+- Anthropic: Do not pass through unrecognized `extra_body` fields.
+
+## 0.3.176 (10 February 2026)
+
+- Eval Logs: Async parallel reading of eval log headers from S3, reducing time from 12+ minutes to ~12 seconds for ~600 files.
+- Bugfix: Correct handling of `ComposeConfig` for Docker sandbox provider.
+
+## 0.3.175 (10 February 2026)
+
+- OpenRouter: Retry 500 and 504 errors returned in request JSON body.
+- Scoring: Allow customisation of grouped metric names.
+- Model API: Don't strictly require OpenAI and Anthropic versions when they aren't in use.
+- Inspect View: Show live requests and responses for model call events in the transcript.
+- Inspect View: Improve scroll performance when viewing sample transcripts and messages.
+
+## 0.3.174 (09 February 2026)
+
+- Compaction: Remove reasoning blocks from `compact()` result for Anthropic provider.
+
+## 0.3.173 (08 February 2026)
+
+- Compaction: Correct capture of compaction results for Anthropic streaming mode.
+- Compaction: Improved prefix handling (drop all by system messages) for native compaction.
+- Compaction: Improved display of OpenAI and Anthropic compaction data in the viewer.
+
+## 0.3.172 (06 February 2026)
+
+- Inspect View: Fix a regression which affected the display of samples within VSCode.
+
+## 0.3.171 (06 February 2026)
+
+- Compaction: New `CompactionNative` strategy which uses provider-native compaction (currently only available for OpenAI and Anthropic Claude 4.6).
+- Compaction: New `CompactionAuto` strategy which uses `CompactionNative` if possible and falls back to `CompactionSummary`.
+- `store_from_events()` and `store_from_events_as()` functions for reconstructing the store from a list of events.
+- OpenAI: Updated to 2.17.0 of `openai` package to get correct types for web search `ActionFind`.
+- Anthropic: Built-in tool (e.g. web search, code execution) compatibility for Claude 4.6.
+- Anthropic: Support `--reasoning-effort` (via adaptive thinking) and  `--effort=max` option for Claude 4.6.
+- Added `extra_headers` to `GenerateConfig` for sending extra HTTP headers along with provider requests.
+- Together Batch API: Update to version 2.0.0 of `together` package.
+- Inspect View: Add sticky headers for transcript events and show turn number to improve "where am I" UX.
+- Inspect View: Show errors in model call events in the transcript.
+- Inspect View: Show tracebacks in model call events in the transcript.
+- Inspect View: Fix slow performance loading samples caused by unnecessary repeat load calls in SampleDetailView.
+- Inspect View: Fix incorrectly disabled sample navigation when viewing samples with numeric sample ids.
+- Inspect View: Fix issue where a large number of logs could result in laggy or hung viewer in VSCode.
+- Bugfix: `handoff()` now respects `react()` name parameter when creating the transfer_to_X tool name.
+- Bugfix: Correctly handle optional `content` field in Anthropic agent bridge `tool_result`.
+
+## 0.3.170 (03 February 2026)
+
+- Added `stable_message_ids()` function for yielding stable ids based on model content (but always unique within a given conversation).
+- Model API: Added `CompactionEvent` for model compactions.
+- Sandboxes: Enable sandbox providers to declare Docker compatibility, which will result in Docker config files being passed to them.
+- Docker Sandbox: Store auto-compose files in centralized project-keyed location (rather than alongside tasks).
+- Inspect View: Improve reliability of code syntax highlighting in messages and events.
+- Inspect View: Support zstd compression of eval log file contents.
+- Inspect View: Fix issue where viewing sample events could result in flashing and scroll oscillation.
+- Inspect View: Render `<think>` tags when included in user messages.
+- Bugfix: Correct handling for `--reasoning-history` CLI argument (don't parse as boolean).
+- Bugfix: Submit to `human_cli()` with no answer now correctly completes task.
+
+## 0.3.169 (01 February 2026)
+
+- Anthropic: Correct handling of beta server tool use blocks for bridge clients that use the beta API (e.g. PydanticAI).
+- OpenAI: Workaround for openai Python SDK inability to round trip 'find_in_page' web search actions.
+- Reasoning: Don't process `<think>` tags in assistant message loading (now all done directly by model providers).
+- Web Search: Use internal search providers by default when no external provider is defined (previously they required explicit enabling).
+- Web Search: Fallback to Google CSE provider only when Google CSE environment variables are defined (the CSE service has been deprecated by Google).
+- Eval Logs: Improve eval log loading performance with JSON cache key for messages.
+- Eval Logs: Support Zstd compression of eval logs for improved performance via `INSPECT_USE_ZSTD` environment variable.
+- Agent Bridge: Make sandbox_agent_bridge cleanup errors non-fatal when agent completes
+- Compaction: Add source="compaction" to InfoEvent created by compaction.
+
+## 0.3.168 (31 January 2026)
+
+- [nnterp](https://inspect.aisi.org.uk/providers.html#nnterp) model provider enabling use of `StandardizedTransformer` models with Inspect.
+- OpenAI Compatible: More generic handling for reasoning payloads (playback reasoning in exactly the same body field it was captured from).
+- Eval Logs: Add `EvalStatus` type alias for evaluation status literals (`"started"`, `"success"`, `"cancelled"`, `"error"`).
 - Bugfix: raise PrerequisiteError when bundling to a subdirectory of the log dir (instead of deleting the logs from the log dir).
 
 ## 0.3.167 (29 January 2026)

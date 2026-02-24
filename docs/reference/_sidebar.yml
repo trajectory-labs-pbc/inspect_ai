@@ -324,6 +324,8 @@ website:
           href: reference/inspect_ai.model.qmd#trim_messages
         - text: user_prompt
           href: reference/inspect_ai.model.qmd#user_prompt
+        - text: stable_message_ids
+          href: reference/inspect_ai.model.qmd#stable_message_ids
         - text: Content
           href: reference/inspect_ai.model.qmd#content
         - text: ContentText
@@ -362,6 +364,10 @@ website:
           href: reference/inspect_ai.model.qmd#compact
         - text: CompactionStrategy
           href: reference/inspect_ai.model.qmd#compactionstrategy
+        - text: CompactionAuto
+          href: reference/inspect_ai.model.qmd#compactionauto
+        - text: CompactionNative
+          href: reference/inspect_ai.model.qmd#compactionnative
         - text: CompactionEdit
           href: reference/inspect_ai.model.qmd#compactionedit
         - text: CompactionSummary
@@ -372,8 +378,12 @@ website:
           href: reference/inspect_ai.model.qmd#get_model_info
         - text: set_model_info
           href: reference/inspect_ai.model.qmd#set_model_info
+        - text: set_model_cost
+          href: reference/inspect_ai.model.qmd#set_model_cost
         - text: ModelInfo
           href: reference/inspect_ai.model.qmd#modelinfo
+        - text: ModelCost
+          href: reference/inspect_ai.model.qmd#modelcost
         - text: Logprob
           href: reference/inspect_ai.model.qmd#logprob
         - text: Logprobs
@@ -489,6 +499,8 @@ website:
           href: reference/inspect_ai.log.qmd#uninvalidate_samples
         - text: ProvenanceData
           href: reference/inspect_ai.log.qmd#provenancedata
+        - text: EvalStatus
+          href: reference/inspect_ai.log.qmd#evalstatus
         - text: EvalLog
           href: reference/inspect_ai.log.qmd#evallog
         - text: EvalSpec
@@ -615,6 +627,8 @@ website:
           href: reference/inspect_ai.event.qmd#modelevent
         - text: ToolEvent
           href: reference/inspect_ai.event.qmd#toolevent
+        - text: CompactionEvent
+          href: reference/inspect_ai.event.qmd#compactionevent
         - text: ApprovalEvent
           href: reference/inspect_ai.event.qmd#approvalevent
         - text: SandboxEvent
@@ -635,10 +649,10 @@ website:
           href: reference/inspect_ai.event.qmd#event_sequence
         - text: EventTree
           href: reference/inspect_ai.event.qmd#eventtree
-        - text: EventNode
-          href: reference/inspect_ai.event.qmd#eventnode
-        - text: SpanNode
-          href: reference/inspect_ai.event.qmd#spannode
+        - text: EventTreeSpan
+          href: reference/inspect_ai.event.qmd#eventtreespan
+        - text: EventTreeNode
+          href: reference/inspect_ai.event.qmd#eventtreenode
         - text: SampleInitEvent
           href: reference/inspect_ai.event.qmd#sampleinitevent
         - text: SampleLimitEvent
@@ -668,10 +682,16 @@ website:
           href: reference/inspect_ai.util.qmd#store_as
         - text: StoreModel
           href: reference/inspect_ai.util.qmd#storemodel
+        - text: store_from_events
+          href: reference/inspect_ai.util.qmd#store_from_events
+        - text: store_from_events_as
+          href: reference/inspect_ai.util.qmd#store_from_events_as
         - text: message_limit
           href: reference/inspect_ai.util.qmd#message_limit
         - text: token_limit
           href: reference/inspect_ai.util.qmd#token_limit
+        - text: cost_limit
+          href: reference/inspect_ai.util.qmd#cost_limit
         - text: time_limit
           href: reference/inspect_ai.util.qmd#time_limit
         - text: working_limit
@@ -728,6 +748,14 @@ website:
           href: reference/inspect_ai.util.qmd#sandboxenv
         - text: sandbox_service
           href: reference/inspect_ai.util.qmd#sandbox_service
+        - text: ExecRemoteProcess
+          href: reference/inspect_ai.util.qmd#execremoteprocess
+        - text: ExecRemoteStreamingOptions
+          href: reference/inspect_ai.util.qmd#execremotestreamingoptions
+        - text: ExecRemoteAwaitableOptions
+          href: reference/inspect_ai.util.qmd#execremoteawaitableoptions
+        - text: ExecRemoteEvent
+          href: reference/inspect_ai.util.qmd#execremoteevent
         - text: registry_info
           href: reference/inspect_ai.util.qmd#registry_info
         - text: registry_create
@@ -783,6 +811,8 @@ website:
           href: reference/inspect_ai.hooks.qmd#runstart
         - text: SampleEnd
           href: reference/inspect_ai.hooks.qmd#sampleend
+        - text: SampleInit
+          href: reference/inspect_ai.hooks.qmd#sampleinit
         - text: SampleStart
           href: reference/inspect_ai.hooks.qmd#samplestart
         - text: TaskEnd

@@ -1,3 +1,4 @@
+from inspect_ai._util.logger import warn_once
 from inspect_ai._util.registry import (
     RegistryInfo,
     RegistryType,
@@ -11,6 +12,7 @@ from inspect_ai.util._limit import (
     LimitScope,
     SampleLimits,
     apply_limits,
+    cost_limit,
     message_limit,
     sample_limits,
     time_limit,
@@ -36,6 +38,10 @@ from ._sandbox import (
     ComposeConfig,
     ComposeHealthcheck,
     ComposeService,
+    ExecRemoteAwaitableOptions,
+    ExecRemoteEvent,
+    ExecRemoteProcess,
+    ExecRemoteStreamingOptions,
     OutputLimitExceededError,
     SandboxConnection,
     SandboxEnvironment,
@@ -54,7 +60,7 @@ from ._sandbox import (
     sandboxenv,
 )
 from ._span import span
-from ._store import Store, store
+from ._store import Store, store, store_from_events, store_from_events_as
 from ._store_model import StoreModel, store_as
 from ._subprocess import (
     ExecResult,
@@ -106,6 +112,8 @@ __all__ = [
     "sandbox_service",
     "Store",
     "store",
+    "store_from_events",
+    "store_from_events_as",
     "StoreModel",
     "store_as",
     "span",
@@ -114,11 +122,13 @@ __all__ = [
     "subtask",
     "throttle",
     "background",
+    "cost_limit",
     "token_limit",
     "time_limit",
     "working_limit",
     "trace_action",
     "trace_message",
+    "warn_once",
     "RegistryInfo",
     "RegistryType",
     "registry_create",
@@ -126,4 +136,8 @@ __all__ = [
     "EarlyStopping",
     "EarlyStop",
     "EarlyStoppingSummary",
+    "ExecRemoteAwaitableOptions",
+    "ExecRemoteEvent",
+    "ExecRemoteProcess",
+    "ExecRemoteStreamingOptions",
 ]

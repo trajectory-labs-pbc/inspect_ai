@@ -8,11 +8,14 @@ title: "inspect_ai.util"
 ### store
 ### store_as
 ### StoreModel
+### store_from_events
+### store_from_events_as
 
 ## Limits
 
 ### message_limit
 ### token_limit
+### cost_limit
 ### time_limit
 ### working_limit
 ### apply_limits
@@ -54,6 +57,10 @@ title: "inspect_ai.util"
 ### SandboxConnection
 ### sandboxenv
 ### sandbox_service
+### ExecRemoteProcess
+### ExecRemoteStreamingOptions
+### ExecRemoteAwaitableOptions
+### ExecRemoteEvent
 
 ## Registry
 

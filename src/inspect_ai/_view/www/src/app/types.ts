@@ -2,6 +2,7 @@ import { GridState } from "ag-grid-community";
 import { StateSnapshot } from "react-virtuoso";
 import {
   ApprovalEvent,
+  CompactionEvent,
   ContentImage,
   ContentText,
   EvalSample,
@@ -39,7 +40,6 @@ export interface AppState {
     sample: string;
   };
   dialogs: {
-    sample: boolean;
     transcriptFilter: boolean;
     options: boolean;
   };
@@ -117,8 +117,6 @@ export interface LogState {
   filter: string;
   filterError?: FilterError;
 
-  epoch: string;
-  sort: string;
   selectedScores?: ScoreLabel[];
   scores?: ScoreLabel[];
 
@@ -154,6 +152,7 @@ export interface SampleState {
 export type Event =
   | SampleInitEvent
   | SampleLimitEvent
+  | CompactionEvent
   | SandboxEvent
   | StateEvent
   | StoreEvent

@@ -23,7 +23,6 @@ from ..environment import (
 )
 from ..limits import (
     SandboxEnvironmentLimits,
-    verify_exec_result_size,
     verify_read_file_size,
 )
 from ..registry import sandboxenv
@@ -58,6 +57,10 @@ class DockerSandboxEnvironment(SandboxEnvironment):
     @classmethod
     def config_files(cls) -> list[str]:
         return COMPOSE_FILES + [DOCKERFILE]
+
+    @classmethod
+    def is_docker_compatible(cls) -> bool:
+        return True
 
     @classmethod
     def default_concurrency(cls) -> int | None:
@@ -314,7 +317,6 @@ class DockerSandboxEnvironment(SandboxEnvironment):
             output_limit=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
             concurrency=concurrency,
         )
-        verify_exec_result_size(exec_result)
         if exec_result.returncode == 126 and "permission denied" in exec_result.stdout:
             raise PermissionError(f"Permission denied executing command: {exec_result}")
 

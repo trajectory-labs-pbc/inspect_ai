@@ -72,6 +72,7 @@ from inspect_ai._util.images import file_as_data
 from inspect_ai._util.kvstore import inspect_kvstore
 from inspect_ai._util.logger import warn_once
 from inspect_ai._util.trace import trace_message
+from inspect_ai.log._samples import set_active_model_event_call
 from inspect_ai.model import (
     ChatCompletionChoice,
     ChatMessage,
@@ -91,11 +92,12 @@ from inspect_ai.model._chat_message import ChatMessageSystem
 from inspect_ai.model._generate_config import normalized_batch_config
 from inspect_ai.model._model import log_model_retry
 from inspect_ai.model._model_call import ModelCall
-from inspect_ai.model._providers._google_batch import GoogleBatcher
+from inspect_ai.model._providers._google_batch import GoogleBatcher, batch_request_dict
 from inspect_ai.model._providers._google_citations import (
     distribute_citations_to_text_parts,
     get_candidate_citations,
 )
+from inspect_ai.model._reasoning import reasoning_to_think_tag
 from inspect_ai.model._retry import model_retry_config
 from inspect_ai.tool import (
     ToolCall,
@@ -283,7 +285,9 @@ class GoogleGenAIAPI(ModelAPI):
             request_id = http_hooks.start_request()
 
             # Create google-genai types.
-            gemini_contents = await as_chat_messages(client, input)
+            gemini_contents = await as_chat_messages(
+                client, input, emulate_reasoning=not self.is_gemini_thinking()
+            )
             has_native_tools, gemini_tools = (
                 self.chat_tools(tools) if len(tools) > 0 else (False, None)
             )
@@ -298,6 +302,7 @@ class GoogleGenAIAPI(ModelAPI):
             parameters = GenerateContentConfig(
                 http_options=HttpOptions(
                     headers={HttpHooks.REQUEST_ID_HEADER: request_id}
+                    | (config.extra_headers or {})
                 ),
                 temperature=config.temperature,
                 top_p=config.top_p,
@@ -321,19 +326,16 @@ class GoogleGenAIAPI(ModelAPI):
                     config.response_schema.json_schema.model_dump(exclude_none=True)
                 )
 
-            response: GenerateContentResponse | None = None
+            model_call = start_model_call(
+                contents=gemini_contents,  # type: ignore[arg-type]
+                safety_settings=self.safety_settings,
+                generation_config=parameters,
+                tools=gemini_tools,
+                tool_config=gemini_tool_config,
+                system_instruction=system_instruction,
+            )
 
-            def model_call() -> ModelCall:
-                return build_model_call(
-                    contents=gemini_contents,  # type: ignore[arg-type]
-                    safety_settings=self.safety_settings,
-                    generation_config=parameters,
-                    tools=gemini_tools,
-                    tool_config=gemini_tool_config,
-                    system_instruction=system_instruction,
-                    response=response,
-                    time=http_hooks.end_request(request_id),
-                )
+            response: GenerateContentResponse | None = None
 
             try:
                 # google sometimes requires retries for malformed function calls
@@ -342,13 +344,7 @@ class GoogleGenAIAPI(ModelAPI):
                 while tool_calling_attempts < 3:
                     if self._batcher:
                         response = await self._batcher.generate_for_request(
-                            {
-                                "contents": [
-                                    content.model_dump(exclude_none=True)
-                                    for content in gemini_contents
-                                ],
-                                **parameters.model_dump(exclude_none=True),
-                            }
+                            batch_request_dict(parameters, gemini_contents)
                         )
                     elif self.streaming:
                         response = await self._stream_generate_content(
@@ -385,9 +381,16 @@ class GoogleGenAIAPI(ModelAPI):
                     else:
                         break
             except ClientError as ex:
-                return self.handle_client_error(ex), model_call()
+                model_call.set_response(
+                    {"error": {"message": str(ex.message), "code": ex.code}},
+                    http_hooks.end_request(request_id),
+                )
+                return self.handle_client_error(ex), model_call
 
             assert response is not None  # mypy confused by retry loop
+
+            model_call.set_response(response, http_hooks.end_request(request_id))
+
             model_name = response.model_version or self.service_model_name()
             output = ModelOutput(
                 model=model_name,
@@ -395,7 +398,7 @@ class GoogleGenAIAPI(ModelAPI):
                 usage=usage_metadata_to_model_usage(response.usage_metadata),
             )
 
-            return output, model_call()
+            return output, model_call
 
     async def _stream_generate_content(
         self,
@@ -551,7 +554,11 @@ class GoogleGenAIAPI(ModelAPI):
         )
 
     @override
-    async def count_tokens(self, input: str | list[ChatMessage]) -> int:
+    async def count_tokens(
+        self,
+        input: str | list[ChatMessage],
+        config: GenerateConfig | None = None,
+    ) -> int:
         client = self.model_client()
         async with client.aio:
             # normalize to messages
@@ -566,7 +573,10 @@ class GoogleGenAIAPI(ModelAPI):
                 for m in input
             ]
             contents: list[ContentUnion] = [
-                await content(client, m) for m in count_messages
+                await content(
+                    client, m, emulate_reasoning=not self.is_gemini_thinking()
+                )
+                for m in count_messages
             ]
             response = await client.aio.models.count_tokens(
                 model=self.service_model_name(), contents=contents
@@ -575,7 +585,7 @@ class GoogleGenAIAPI(ModelAPI):
                 return response.total_tokens
             else:
                 logger.warning("Gemini token count returned None")
-                return await super().count_tokens(input)
+                return await super().count_tokens(input, config)
 
     def service_model_name(self) -> str:
         """Model name without any service prefix."""
@@ -614,15 +624,13 @@ class GoogleGenAIAPI(ModelAPI):
             and not self.is_gemini_2_5()
         )
 
+    def is_gemini_thinking(self) -> bool:
+        return not self.is_gemini_1_5() and not self.is_gemini_2_0()
+
     def is_gemini_thinking_only(self) -> bool:
         return (
             self.is_gemini_2_5() or self.is_gemini_3()
         ) and "-pro" in self.service_model_name()
-
-    @override
-    def emulate_reasoning_history(self) -> bool:
-        # older gemini models don't know about reasoning
-        return self.is_gemini_1_5() or self.is_gemini_2_0()
 
     @override
     def should_retry(self, ex: BaseException) -> bool:
@@ -655,6 +663,17 @@ class GoogleGenAIAPI(ModelAPI):
         )
 
     def handle_client_error(self, ex: ClientError) -> ModelOutput | Exception:
+        # exceeding a quota with a limit of 0 means no access to model or capability,
+        # for these cases convert to a runtime error so the sample fails.
+        if (
+            ex.code == 429
+            and ex.message
+            and "quota" in ex.message
+            and "limit: 0" in ex.message
+        ):
+            return RuntimeError(ex.message)
+
+        # detect context overflow and convert to ModelOutput
         if (
             ex.code == 400
             and ex.message
@@ -869,17 +888,15 @@ def safety_settings_to_list(
     return settings
 
 
-def build_model_call(
+def start_model_call(
     contents: ContentListUnion | ContentListUnionDict,
     generation_config: GenerateContentConfig,
     safety_settings: list[SafetySettingDict],
     tools: ToolListUnion | None,
     tool_config: ToolConfig | None,
     system_instruction: list[File | Part | Image | str] | None,
-    response: GenerateContentResponse | None,
-    time: float | None,
 ) -> ModelCall:
-    return ModelCall.create(
+    return set_active_model_event_call(
         request=dict(
             contents=contents,
             # the excluded fields are passed to the Python API as part of
@@ -898,9 +915,7 @@ def build_model_call(
             tool_config=tool_config if tool_config is not None else None,
             system_instruction=system_instruction,
         ),
-        response=response if response is not None else {},
         filter=model_call_filter,
-        time=time,
     )
 
 
@@ -912,7 +927,7 @@ def model_call_filter(key: JsonValue | None, value: JsonValue) -> JsonValue:
 
 
 async def as_chat_messages(
-    client: Client, messages: list[ChatMessage]
+    client: Client, messages: list[ChatMessage], emulate_reasoning: bool = False
 ) -> list[Content]:
     # There is no "system" role in the `google-genai` package. Instead, system messages
     # are included in the `GenerateContentConfig` as a `system_instruction`. Strip any
@@ -920,7 +935,10 @@ async def as_chat_messages(
     supported_messages = [message for message in messages if message.role != "system"]
 
     # build google chat messages
-    chat_messages = [await content(client, message) for message in supported_messages]
+    chat_messages = [
+        await content(client, message, emulate_reasoning)
+        for message in supported_messages
+    ]
 
     # combine consecutive tool messages
     chat_messages = functools.reduce(
@@ -956,6 +974,7 @@ def is_tool_message(message: Content) -> bool:
 async def content(
     client: Client,
     message: ChatMessageUser | ChatMessageAssistant | ChatMessageTool,
+    emulate_reasoning: bool = False,
 ) -> Content:
     working_reasoning_block = None
     if isinstance(message, ChatMessageUser):
@@ -977,13 +996,18 @@ async def content(
         else:
             for i, content in enumerate(message.content):
                 if isinstance(content, ContentReasoning):
-                    # if this is encrypted reasoning, save it for applying the thought_signature
-                    # to the next part (don't emit a separate thought part during replay)
-                    if content.redacted:
-                        working_reasoning_block = content
+                    if emulate_reasoning:
+                        content_parts.append(Part(text=reasoning_to_think_tag(content)))
                     else:
-                        # unencrypted reasoning (for older models or debugging)
-                        content_parts.append(Part(text=content.reasoning, thought=True))
+                        # if this is encrypted reasoning, save it for applying the thought_signature
+                        # to the next part (don't emit a separate thought part during replay)
+                        if content.redacted:
+                            working_reasoning_block = content
+                        else:
+                            # unencrypted reasoning (for older models or debugging)
+                            content_parts.append(
+                                Part(text=content.reasoning, thought=True)
+                            )
 
                 else:
                     # server side tool use

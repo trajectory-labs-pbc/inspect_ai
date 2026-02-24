@@ -278,6 +278,23 @@ def transformer_lens() -> type[ModelAPI]:
     return TransformerLensAPI
 
 
+@modelapi(name="nnterp")
+def nnterp() -> type[ModelAPI]:
+    FEATURE = "NNterp API"
+    PACKAGE = "nnterp"
+
+    # verify we have the package
+    try:
+        import nnterp  # type: ignore # noqa: F401
+    except ImportError:
+        raise pip_dependency_error(FEATURE, [PACKAGE])
+
+    # in the clear
+    from .nnterp import NNterpAPI
+
+    return NNterpAPI
+
+
 @modelapi(name="none")
 def none() -> type[ModelAPI]:
     from .none import NoModel
@@ -299,7 +316,7 @@ def hf_inference_providers() -> type[ModelAPI]:
 def validate_openai_client(feature: str) -> None:
     FEATURE = feature
     PACKAGE = "openai"
-    MIN_VERSION = "2.8.0"
+    MIN_VERSION = "2.17.0"
 
     # verify we have the package
     try:
@@ -313,7 +330,7 @@ def validate_openai_client(feature: str) -> None:
 
 def validate_anthropic_client(feature: str) -> None:
     PACKAGE = "anthropic"
-    MIN_VERSION = "0.75.0"
+    MIN_VERSION = "0.80.0"
 
     # verify we have the package
     try:
@@ -325,8 +342,7 @@ def validate_anthropic_client(feature: str) -> None:
     verify_required_version(feature, PACKAGE, MIN_VERSION)
 
 
-def validate_google_client(function_name: str) -> None:
-    FEATURE = "Google API"
+def validate_google_client(feature: str) -> None:
     PACKAGE = "google-genai"
     MIN_VERSION = "1.56.0"
 
@@ -334,7 +350,7 @@ def validate_google_client(function_name: str) -> None:
     try:
         import google.genai  # type: ignore  # noqa: F401
     except ImportError:
-        raise pip_dependency_error(FEATURE, [PACKAGE])
+        raise pip_dependency_error(feature, [PACKAGE])
 
     # verify version
-    verify_required_version(FEATURE, PACKAGE, MIN_VERSION)
+    verify_required_version(feature, PACKAGE, MIN_VERSION)

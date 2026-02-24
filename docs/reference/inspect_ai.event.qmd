@@ -6,9 +6,11 @@ title: "inspect_ai.event"
 
 ### ModelEvent
 ### ToolEvent
+### CompactionEvent
 ### ApprovalEvent
 ### SandboxEvent
 ### InfoEvent
+### ScoreEvent
 ### LoggerEvent
 ### ErrorEvent
 ### SpanBeginEvent
@@ -19,8 +21,21 @@ title: "inspect_ai.event"
 ### event_tree
 ### event_sequence
 ### EventTree
-### EventNode
-### SpanNode
+### EventTreeSpan
+### EventTreeNode
+
+## Timeline
+
+### timeline_build
+### timeline_dump
+### timeline_filter
+### timeline_load
+### Timeline
+### TimelineBranch
+### TimelineEvent
+### TimelineSpan
+### Outline
+### OutlineNode
 
 ## Eval Events
 
@@ -29,7 +44,7 @@ title: "inspect_ai.event"
 ### StateEvent
 ### StoreEvent
 ### InputEvent
-### ScoreEvent
+
 ### ScoreEditEvent
 
 ## Types

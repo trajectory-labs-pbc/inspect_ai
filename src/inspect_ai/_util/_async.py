@@ -117,7 +117,8 @@ def run_coroutine(coroutine: Coroutine[None, None, T]) -> T:
 
     if running_in_notebook():
         init_nest_asyncio()
-        return asyncio.run(coroutine)
+        result = asyncio.run(coroutine)
+        return result
     else:
         try:
             # this will throw if there is no running loop
@@ -131,7 +132,8 @@ def run_coroutine(coroutine: Coroutine[None, None, T]) -> T:
             # and run it.
             pass
 
-        return asyncio.run(coroutine)
+        result = asyncio.run(coroutine)
+        return result
 
 
 def current_async_backend() -> Literal["asyncio", "trio"] | None:

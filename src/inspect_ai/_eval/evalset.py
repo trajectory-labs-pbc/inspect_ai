@@ -38,6 +38,7 @@ from inspect_ai.log import EvalLog
 from inspect_ai.log._bundle import bundle_log_dir
 from inspect_ai.log._file import (
     EvalLogInfo,
+    ReadEvalLogsProgress,
     list_eval_logs,
     read_eval_log_headers,
     write_log_dir_manifest,
@@ -50,6 +51,8 @@ from inspect_ai.model import (
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._model import ModelName
 from inspect_ai.model._model_config import model_roles_to_model_roles_config
+from inspect_ai.model._model_data.model_data import ModelCost
+from inspect_ai.scorer._reducer import reducer_log_name
 from inspect_ai.solver._chain import chain
 from inspect_ai.solver._solver import Solver, SolverSpec
 from inspect_ai.util import DisplayType, SandboxEnvironmentType
@@ -83,6 +86,7 @@ class EvalSetArgsInTaskIdentifier:
     token_limit: int | None = None
     time_limit: int | None = None
     working_limit: int | None = None
+    cost_limit: float | None = None
 
 
 def eval_set(
@@ -121,6 +125,8 @@ def eval_set(
     token_limit: int | None = None,
     time_limit: int | None = None,
     working_limit: int | None = None,
+    cost_limit: float | None = None,
+    model_cost_config: str | dict[str, ModelCost] | None = None,
     max_samples: int | None = None,
     max_tasks: int | None = None,
     max_subprocesses: int | None = None,
@@ -203,6 +209,9 @@ def eval_set(
         working_limit: Limit on working time (in seconds) for sample. Working
             time includes model generation, tool calls, etc. but does not include
             time spent waiting on retries or shared resources.
+        cost_limit: Limit on total cost (in dollars) for each sample.
+            Requires model cost data via set_model_cost() or --model-cost-config.
+        model_cost_config: YAML or JSON file with model prices for cost tracking.
         max_samples: Maximum number of samples to run in parallel
             (default is max_connections)
         max_tasks: Maximum number of tasks to run in parallel
@@ -238,7 +247,10 @@ def eval_set(
 
     # helper function to run a set of evals
     def run_eval(
-        eval_set_id: str, tasks: list[ResolvedTask] | list[PreviousTask]
+        eval_set_id: str,
+        tasks: list[ResolvedTask]
+        | list[PreviousTask]
+        | list[ResolvedTask | PreviousTask],
     ) -> list[EvalLog]:
         # run evals
         results = eval(
@@ -272,6 +284,8 @@ def eval_set(
             token_limit=token_limit,
             time_limit=time_limit,
             working_limit=working_limit,
+            cost_limit=cost_limit,
+            model_cost_config=model_cost_config,
             max_samples=max_samples,
             max_tasks=max_tasks,
             max_subprocesses=max_subprocesses,
@@ -290,12 +304,6 @@ def eval_set(
         # check for cancelled
         if evals_cancelled(results):
             raise KeyboardInterrupt
-
-        # if specified, bundle the output directory
-        if bundle_dir:
-            bundle_log_dir(
-                log_dir=log_dir, output_dir=bundle_dir, overwrite=bundle_overwrite
-            )
 
         # return results
         return results
@@ -393,6 +401,7 @@ def eval_set(
             token_limit=token_limit,
             time_limit=time_limit,
             working_limit=working_limit,
+            cost_limit=cost_limit,
         )
         # validate that:
         #  (1) All tasks have a unique identifier
@@ -412,30 +421,26 @@ def eval_set(
         # see which tasks are yet to run (to complete successfully we need
         # a successful eval for every [task_file/]task_name/model combination)
         # for those that haven't run, schedule them into models => tasks groups
-        log_task_identifiers = [log.task_identifier for log in all_logs]
+        # (exclude logs where sample_shuffle changed with a limit -- a different
+        # shuffle selects a different subset of samples so the log can't be reused)
+        reusable_logs = [
+            log
+            for log in all_logs
+            if not shuffle_changed(sample_shuffle, log.header.eval.config, limit)
+        ]
+        log_task_identifiers = [log.task_identifier for log in reusable_logs]
         all_tasks = [
             (task_identifier(task, eval_set_args), task) for task in resolved_tasks
         ]
         pending_tasks = [
             task[1] for task in all_tasks if task[0] not in log_task_identifiers
         ]
-
-        # we have some pending tasks yet to run, run them
-        if len(pending_tasks) > 0:
-            # run the tasks
-            run_logs = run_eval(eval_set_id, pending_tasks)
-
-            # if this was the entire list of resolved tasks, return results
-            if len(pending_tasks) == len(all_tasks):
-                return run_logs
-            # otherwise query the filesystem
-            else:
-                latest_logs = latest_completed_task_eval_logs(
-                    logs=list_all_eval_logs(log_dir), cleanup_older=False
-                )
-                return [log.header for log in latest_logs]
-
-        # all tasks have had an initial run, perform retries
+        tasks_to_run: (
+            list[ResolvedTask | PreviousTask] | list[ResolvedTask] | list[PreviousTask]
+        )
+        if len(pending_tasks) == len(all_tasks):
+            tasks_to_run = pending_tasks
+            success_logs: list[Log] = []
         else:
             # look for retryable eval logs and cleave them into success/failed
             success_logs, failed_logs = list_latest_eval_logs(
@@ -445,29 +450,32 @@ def eval_set(
                 limit=limit,
                 cleanup_older=retry_cleanup,
             )
-
-            # retry the failed logs (look them up in resolved_tasks)
-            if len(failed_logs) > 0:
-                # schedule the re-execution of the failed tasks
+            if not failed_logs:
+                failed_tasks = []
+            else:
                 failed_task_identifiers = [log.task_identifier for log in failed_logs]
-                failed_tasks = [
+                failed_resolved_tasks = [
                     task
                     for task in resolved_tasks
                     if task_identifier(task, eval_set_args) in failed_task_identifiers
                 ]
-
-                # run previous tasks (no models passed b/c previous task already carries its model)
-                retried_logs = run_eval(
-                    eval_set_id=eval_set_id,
-                    tasks=as_previous_tasks(failed_tasks, failed_logs, eval_set_args),
+                failed_tasks = as_previous_tasks(
+                    failed_resolved_tasks, failed_logs, eval_set_args
                 )
-
-                # return success
-                return [log.header for log in success_logs] + retried_logs
-
-            # no failed logs to retry, just return sucesss logs
-            else:
+            tasks_to_run = pending_tasks + failed_tasks
+            if not tasks_to_run:
+                # no new tasks and no failed logs to retry, just return success logs
                 return [log.header for log in success_logs]
+
+        # run the tasks
+        run_logs = run_eval(eval_set_id, tasks_to_run)
+
+        # if this was the entire list of resolved tasks, return results
+        if len(tasks_to_run) == len(all_tasks):
+            return run_logs
+        # otherwise combine the successful logs with the newly run logs
+        else:
+            return [log.header for log in success_logs] + run_logs
 
     # create retry policy
     retry = Retrying(
@@ -490,6 +498,12 @@ def eval_set(
     if retry_cleanup:
         task_ids = {result.eval.task_id for result in results}
         cleanup_older_eval_logs(log_dir, task_ids)
+
+    # if specified, bundle the output directory
+    if bundle_dir:
+        bundle_log_dir(
+            log_dir=log_dir, output_dir=bundle_dir, overwrite=bundle_overwrite
+        )
 
     # report final status
     success = all_evals_succeeded(results)
@@ -581,10 +595,12 @@ def return_last_value(retry_state: RetryCallState) -> list[EvalLog]:
 
 
 # list all eval logs
-# recursive=False is used by inspect_flow
-def list_all_eval_logs(log_dir: str, recursive: bool = True) -> list[Log]:
+# recursive=False and progress are used by inspect_flow
+def list_all_eval_logs(
+    log_dir: str, recursive: bool = True, progress: ReadEvalLogsProgress | None = None
+) -> list[Log]:
     log_files = list_eval_logs(log_dir, recursive=recursive)
-    log_headers = read_eval_log_headers(log_files)
+    log_headers = read_eval_log_headers(log_files, progress)
     task_identifiers = [task_identifier(log_header, None) for log_header in log_headers]
     return [
         Log(info=info, header=header, task_identifier=task_identifier)
@@ -662,6 +678,17 @@ def log_samples_complete(
     return True
 
 
+def shuffle_changed(
+    sample_shuffle: bool | int | None,
+    config: EvalConfig,
+    limit: int | tuple[int, int] | None,
+) -> bool:
+    # shuffle only matters when there's a limit constraining which samples run
+    if limit is None:
+        return False
+    return sample_shuffle != config.sample_shuffle
+
+
 def epochs_changed(epochs: Epochs | None, config: EvalConfig) -> bool:
     # user didn't say anything about epochs on subsequent call (not changed)
     if epochs is None:
@@ -676,7 +703,7 @@ def epochs_changed(epochs: Epochs | None, config: EvalConfig) -> bool:
     if epochs.reducer is None and config.epochs_reducer == ["mean"]:
         return False
     # different reducer list (changed)
-    elif [r.__name__ for r in (epochs.reducer or [])] != [
+    elif [reducer_log_name(r) for r in (epochs.reducer or [])] != [
         r for r in (config.epochs_reducer or [])
     ]:
         return True
@@ -795,6 +822,12 @@ def resolve_solver(
         return cast(Solver | None, solver)
 
 
+# Version of the task_identifier computation. Bump this when the task_identifier
+# logic changes, so that persisted identifiers (e.g. in inspect_flow) can be
+# recomputed.
+TASK_IDENTIFIER_VERSION = 1
+
+
 # yield a unique identifier for a task (used to pair resolved tasks to log files)
 def task_identifier(
     task: ResolvedTask | EvalLog,
@@ -808,6 +841,7 @@ def task_identifier(
         token_limit: int | None
         time_limit: int | None
         working_limit: int | None
+        cost_limit: float | None
 
     if isinstance(task, ResolvedTask):
         assert eval_set_args is not None, (
@@ -840,6 +874,9 @@ def task_identifier(
             working_limit=task.task.working_limit
             if eval_set_args.working_limit is None
             else eval_set_args.working_limit,
+            cost_limit=task.task.cost_limit
+            if eval_set_args.cost_limit is None
+            else eval_set_args.cost_limit,
         )
     else:
         task_file = task.eval.task_file or ""
@@ -856,6 +893,7 @@ def task_identifier(
             token_limit=task.eval.config.token_limit,
             time_limit=task.eval.config.time_limit,
             working_limit=task.eval.config.working_limit,
+            cost_limit=task.eval.config.cost_limit,
         )
 
     # strip args from eval_plan as we've changed the way this is serialized

@@ -12,14 +12,15 @@ import { ChatView } from "../chat/ChatView";
 import { EventPanel } from "./event/EventPanel";
 import { EventSection } from "./event/EventSection";
 
+import { ANSIDisplay } from "../../../components/AnsiDisplay";
 import { PulsingDots } from "../../../components/PulsingDots";
-import { usePrismHighlight } from "../../../state/hooks";
+import { usePrismHighlight } from "../../../components/prism";
+import { Message } from "../chat/messages";
 import styles from "./ModelEventView.module.css";
 import { EventNodeContext } from "./TranscriptVirtualList";
 import { EventTimingPanel } from "./event/EventTimingPanel";
 import { formatTiming, formatTitle } from "./event/utils";
 import { EventNode } from "./types";
-import { Message } from "../chat/messages";
 
 interface ModelEventViewProps {
   eventNode: EventNode<ModelEvent>;
@@ -63,7 +64,17 @@ export const ModelEventView: FC<ModelEventViewProps> = ({
   // panel and display those user messages (exclude tool_call messages as they
   // are already shown in the tool call above)
   const userMessages = [];
-  for (const msg of inputMessages.slice().reverse()) {
+
+  // if there is an assistant message immediately before then include this
+  // (as it could be an assistant compaction message)
+  let offset: number | undefined = undefined;
+  const lastMessage = inputMessages.at(-1);
+  if (lastMessage?.role === "assistant") {
+    userMessages.push(lastMessage);
+    offset = -1;
+  }
+
+  for (const msg of inputMessages.slice(offset).reverse()) {
     if (
       (msg.role === "user" && !msg.tool_call_id) ||
       msg.role === "system" ||
@@ -82,6 +93,10 @@ export const ModelEventView: FC<ModelEventViewProps> = ({
     ? `Model Call (${event.role}): ${event.model}`
     : `Model Call: ${event.model}`;
 
+  const turnLabel = context?.turnInfo
+    ? `turn ${context.turnInfo.turnNumber}/${context.turnInfo.totalTurns}`
+    : undefined;
+
   return (
     <EventPanel
       eventNodeId={eventNode.id}
@@ -90,6 +105,7 @@ export const ModelEventView: FC<ModelEventViewProps> = ({
       title={formatTitle(panelTitle, totalUsage, callTime)}
       subTitle={formatTiming(event.timestamp, event.working_start)}
       icon={ApplicationIcons.model}
+      turnLabel={turnLabel}
     >
       <div data-name="Summary" className={styles.container}>
         <ChatView
@@ -100,7 +116,17 @@ export const ModelEventView: FC<ModelEventViewProps> = ({
           resolveToolCallsIntoPreviousMessage={context?.hasToolEvents !== false}
           allowLinking={false}
         />
-        {event.pending ? (
+        {event.error ? (
+          <div className={styles.error}>
+            <i className={ApplicationIcons.error} aria-hidden="true" />
+            <ANSIDisplay
+              output={event.error}
+              style={{
+                fontSize: "clamp(0.3rem, 1.1vw, 0.8rem)",
+              }}
+            />
+          </div>
+        ) : event.pending ? (
           <div className={clsx(styles.progress)}>
             <PulsingDots subtle={false} size="medium" />
           </div>
@@ -155,10 +181,20 @@ export const ModelEventView: FC<ModelEventViewProps> = ({
         <APIView
           data-name="API"
           call={event.call}
+          error={event.error}
           className={styles.container}
         />
       ) : (
         ""
+      )}
+
+      {event.traceback_ansi && (
+        <div data-name="Error" className={styles.container}>
+          <ANSIDisplay
+            output={event.traceback_ansi}
+            className={styles.traceback}
+          />
+        </div>
       )}
     </EventPanel>
   );
@@ -166,17 +202,18 @@ export const ModelEventView: FC<ModelEventViewProps> = ({
 
 interface APIViewProps {
   call: ModelCall;
+  error?: string | null;
   className?: string | string[];
 }
 
-export const APIView: FC<APIViewProps> = ({ call, className }) => {
+export const APIView: FC<APIViewProps> = ({ call, error, className }) => {
   const requestCode = useMemo(() => {
-    return JSON.stringify(call.request, undefined, 2);
-  }, [call.request]);
+    return call?.request ? JSON.stringify(call.request, undefined, 2) : "";
+  }, [call?.request]);
 
   const responseCode = useMemo(() => {
-    return JSON.stringify(call.response, undefined, 2);
-  }, [call.response]);
+    return call?.response ? JSON.stringify(call.response, undefined, 2) : null;
+  }, [call?.response]);
 
   if (!call) {
     return null;
@@ -185,10 +222,16 @@ export const APIView: FC<APIViewProps> = ({ call, className }) => {
   return (
     <div className={clsx(className)}>
       <EventSection title="Request" copyContent={requestCode}>
-        <APICodeCell sourceCode={requestCode} />
+        {requestCode ? <APICodeCell sourceCode={requestCode} /> : "None"}
       </EventSection>
-      <EventSection title="Response" copyContent={responseCode}>
-        <APICodeCell sourceCode={responseCode} />
+      <EventSection title="Response" copyContent={responseCode ?? ""}>
+        {responseCode ? (
+          <APICodeCell sourceCode={responseCode} />
+        ) : error ? (
+          "None"
+        ) : (
+          <PulsingDots subtle={false} size="medium" />
+        )}
       </EventSection>
     </div>
   );
@@ -201,7 +244,7 @@ interface APICodeCellProps {
 
 export const APICodeCell: FC<APICodeCellProps> = ({ id, sourceCode }) => {
   const sourceCodeRef = useRef<HTMLDivElement | null>(null);
-  usePrismHighlight(sourceCodeRef, sourceCode.length);
+  usePrismHighlight(sourceCodeRef, sourceCode?.length ?? 0);
 
   if (!sourceCode) {
     return null;

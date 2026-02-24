@@ -1,7 +1,7 @@
 import logging
 import os
 from importlib import metadata as importlib_metadata
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from shortuuid import uuid
 
@@ -29,6 +29,7 @@ from inspect_ai.log import (
     EvalSample,
     EvalSpec,
     EvalStats,
+    EvalStatus,
 )
 from inspect_ai.log._log import (
     EvalLog,
@@ -89,6 +90,24 @@ def resolve_external_registry_package_version(
         return None
 
     return package_name, package_version
+
+
+def _effective_max_samples(eval_config: EvalConfig, model: Model) -> int:
+    """Resolve effective max_samples for high-throughput detection.
+
+    Follows the resolution chain from create_sample_semaphore (run.py),
+    excluding batch mode (which is not inherently high-throughput).
+    """
+    if eval_config.max_samples is not None:
+        return eval_config.max_samples
+    if model.config.max_connections is not None:
+        return model.config.max_connections
+    return model.api.max_connections()
+
+
+def _is_high_throughput(sample_count: int, effective_max_samples: int) -> bool:
+    """Detect high-throughput runs that benefit from reduced logging overhead."""
+    return effective_max_samples >= 100 or sample_count >= 1000
 
 
 class TaskLogger:
@@ -152,6 +171,19 @@ class TaskLogger:
             ],
         )
 
+        # total samples accounting for slicing and epochs
+        epochs = eval_config.epochs if eval_config.epochs else 1
+        total_samples = len(sample_ids) * epochs
+
+        # adaptive defaults for high-throughput runs
+        eff_max_samples = _effective_max_samples(eval_config, model)
+        high_throughput = _is_high_throughput(total_samples, eff_max_samples)
+        if high_throughput:
+            if eval_config.log_realtime is None:
+                eval_config.log_realtime = False
+            if eval_config.score_display is None:
+                eval_config.score_display = False
+
         # write defaults for unspecified config
         for name, value in eval_config_defaults().items():
             if getattr(eval_config, name, None) is None:
@@ -183,7 +215,7 @@ class TaskLogger:
             solver_args_passed=solver.args_passed if solver else None,
             model=f"{ModelName(model).api}/{model.name}",
             model_generate_config=model.config,
-            model_base_url=model.api.base_url,
+            model_base_url=model.explicit_base_url,
             model_roles=model_roles_to_model_roles_config(model_roles),
             dataset=EvalDataset(
                 name=dataset.name,
@@ -211,8 +243,10 @@ class TaskLogger:
 
         # size of flush buffer (how many samples we buffer before hitting storage)
         self.flush_buffer = eval_config.log_buffer or recorder.default_log_buffer(
-            len(dataset)
+            total_samples, high_throughput
         )
+        if high_throughput and eval_config.log_buffer is None:
+            eval_config.log_buffer = self.flush_buffer
         self.flush_pending: list[tuple[str | int, int]] = []
 
         # sample buffer db
@@ -289,7 +323,7 @@ class TaskLogger:
 
     async def log_finish(
         self,
-        status: Literal["started", "success", "cancelled", "error"],
+        status: EvalStatus,
         stats: EvalStats,
         results: EvalResults | None = None,
         reductions: list[EvalSampleReductions] | None = None,
