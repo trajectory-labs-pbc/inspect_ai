@@ -150,9 +150,7 @@ Documentation = "https://inspect.aisi.org.uk/"
 inspect = "inspect_ai._cli.main:main"
 
 [project.optional-dependencies]
-math = [
-  "math-verify[antlr4_13_2]>=0.9.0",
-]
+math = ["sympy"]
 dev = [
   "adlfs>=2025.8.0",
   "anthropic>=0.62.0",
@@ -167,7 +165,6 @@ dev = [
   "ipython",
   "jsonpath-ng",
   "markdown",
-  "math-verify[antlr4_13_2]>=0.9.0",
   "mcp>=1.10.0",
   "mistralai",
   "moto[server]",
@@ -187,7 +184,7 @@ dev = [
   "pytest-mock",
   "pytest-watcher",
   "pytest-xdist",
-  "ruff==0.9.6",           # match version specified in .pre-commit-config.yaml
+  "ruff==0.9.6",            # match version specified in .pre-commit-config.yaml
   "together",
   "textual-dev>=0.86.2",
   "trio",
