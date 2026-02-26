@@ -1102,7 +1102,7 @@ def _openai_input_items_from_chat_message_assistant(
                         )
 
                 # see if we need to flush d
-                if message_id is not pending_response_output_id:
+                if message_id is not pending_response_output_id or message_phase != pending_response_phase:
                     flush_pending_context_text()
 
                 # register pending output
