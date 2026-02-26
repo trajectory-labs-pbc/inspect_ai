@@ -156,16 +156,18 @@ class TimelineEvent(BaseModel):
         return 0.0
 
 
+_IDLE_THRESHOLD_SECS = 300.0  # 5 minutes
+
+
 def _compute_idle_time(
     content: Sequence["TimelineEvent | TimelineSpan | TimelineBranch"],
     start_time: datetime,
     end_time: datetime,
 ) -> float:
-    """Compute idle time for a span from its children's active time.
+    """Compute idle time using gap-based detection between children.
 
-    For each child, its active time is its wall-clock duration minus its own
-    idle_time. The span's idle time is its wall-clock duration minus the sum
-    of all children's active time, clamped to >= 0.
+    Any gap > 5 min between consecutive children (sorted by start_time)
+    is counted as idle. Children's own idle_time is summed recursively.
 
     Args:
         content: Child nodes of the span.
@@ -175,13 +177,31 @@ def _compute_idle_time(
     Returns:
         Idle time in seconds (>= 0).
     """
-    wall_clock = (end_time - start_time).total_seconds()
-    total_active = 0.0
-    for child in content:
-        child_duration = (child.end_time - child.start_time).total_seconds()
-        child_active = child_duration - child.idle_time
-        total_active += child_active
-    return max(0.0, wall_clock - total_active)
+    if not content:
+        return 0.0
+
+    sorted_children = sorted(content, key=lambda c: c.start_time)
+    idle = sum(child.idle_time for child in sorted_children)
+
+    # Gap: span start → first child
+    gap = (sorted_children[0].start_time - start_time).total_seconds()
+    if gap > _IDLE_THRESHOLD_SECS:
+        idle += gap
+
+    # Gaps between consecutive children
+    for i in range(1, len(sorted_children)):
+        gap = (
+            sorted_children[i].start_time - sorted_children[i - 1].end_time
+        ).total_seconds()
+        if gap > _IDLE_THRESHOLD_SECS:
+            idle += gap
+
+    # Gap: last child → span end
+    gap = (end_time - sorted_children[-1].end_time).total_seconds()
+    if gap > _IDLE_THRESHOLD_SECS:
+        idle += gap
+
+    return max(0.0, idle)
 
 
 def _timeline_content_discriminator(v: Any) -> str:
