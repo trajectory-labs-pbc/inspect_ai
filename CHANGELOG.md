@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Model API: By default, only log raw model api request/response when an error occurs. Override to log all model api calls with `--log-model-api`.
+- Model API: Truncate the model request to a maximum of 200 lines when printing to the console after an error.
 - Model API: Add SageMaker provider for invoking models hosted on AWS SageMaker endpoints.
 - Model API: Normalize handling of cached tokens in `ModelUsage` (input tokens now excludes cached tokens whereas previously it included them for some providers).
 - Model API: Track model usage by model role in addition to globally.
