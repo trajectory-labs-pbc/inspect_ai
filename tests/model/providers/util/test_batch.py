@@ -221,7 +221,7 @@ class TestBatcher:
             # Create batcher that fails batch checks initially
             batcher = FakeBatcher(fail_batch_ids={"batch-0"})
 
-            result: str | None = None
+            result = None
 
             async with anyio.create_task_group() as tg:
 
@@ -444,7 +444,7 @@ class TestBatcher:
                 receive_streams.append(receive_stream)
 
             # Start the batch worker and collect results concurrently
-            collected_results: list[str] = []
+            collected_results = []
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(batcher_mixed._batch_worker)
@@ -595,7 +595,7 @@ class TestBatcher:
             )
 
             # Start a request that will be in the failing batch
-            exc_raised: Exception | None = None
+            exc_raised = None
 
             async with anyio.create_task_group() as tg:
 
@@ -665,7 +665,7 @@ class TestBatcher:
                 fail_batch_ids={"batch-0"},
             )
 
-            result: str | None = None
+            result = None
 
             async with anyio.create_task_group() as tg:
 
@@ -1013,7 +1013,7 @@ class TestBatcher:
             )
 
             # Start a request that will fail
-            exc_raised: Exception | None = None
+            exc_raised = None
 
             start_time = time.time()
             async with anyio.create_task_group() as tg:
