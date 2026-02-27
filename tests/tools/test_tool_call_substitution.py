@@ -1,4 +1,14 @@
-from inspect_ai.tool._tool_call import ToolCallContent, substitute_tool_call_content
+from dataclasses import dataclass, field
+from unittest.mock import patch
+
+from pydantic import JsonValue
+from rich.text import Text
+
+from inspect_ai.tool._tool_call import (
+    ToolCallContent,
+    ToolCallView,
+    substitute_tool_call_content,
+)
 
 
 class TestSubstituteToolCallContent:
@@ -102,3 +112,56 @@ class TestToolViewAsStr:
             arguments={"code": "x"},
         )
         assert tool_view_as_str(event) is None
+
+
+@dataclass
+class _FakeTranscriptToolCall:
+    function: str
+    arguments: dict[str, JsonValue]
+    view: ToolCallContent | None = field(default=None)
+
+
+class TestTranscriptToolCallEscaping:
+    def test_markup_in_title_no_error(self) -> None:
+        from inspect_ai.tool._tool_transcript import transcript_tool_call
+
+        call = _FakeTranscriptToolCall(
+            function="run_code",
+            arguments={"code": "[red]danger[/red]"},
+            view=ToolCallContent(
+                title="Code: {{code}}",
+                format="text",
+                content="{{code}}",
+            ),
+        )
+        result = transcript_tool_call(call)
+        assert len(result) > 0
+        title_text = result[0]
+        assert isinstance(title_text, Text)
+        assert "[red]danger[/red]" in title_text.plain
+
+
+class TestRenderToolApprovalEscaping:
+    @patch("inspect_ai.approval._human.util.display_type", return_value="full")
+    def test_markup_in_title_no_error(self, _mock_display: object) -> None:
+        from inspect_ai.approval._human.util import render_tool_approval
+
+        view = ToolCallView(
+            call=ToolCallContent(
+                title="Run: {{cmd}}",
+                format="text",
+                content="{{cmd}}",
+            ),
+        )
+        result = render_tool_approval(
+            message="Please approve",
+            view=view,
+            arguments={"cmd": "[bold]evil[/bold]"},
+        )
+        assert len(result) > 0
+        # Find the Text renderable containing the title (has "Run:" prefix)
+        title_texts = [
+            r for r in result if isinstance(r, Text) and "Run:" in r.plain
+        ]
+        assert len(title_texts) == 1
+        assert "[bold]evil[/bold]" in title_texts[0].plain
