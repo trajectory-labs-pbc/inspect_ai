@@ -187,7 +187,7 @@ export const substituteToolCallContent = (
 ): ToolCallContent => {
   const replace = (text: string): string =>
     text.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
-      key in args ? String(args[key]) : match,
+      Object.hasOwn(args, key) ? String(args[key]) : match,
     );
 
   return {

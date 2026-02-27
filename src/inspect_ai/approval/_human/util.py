@@ -1,6 +1,7 @@
 from pydantic import JsonValue
 from rich.console import RenderableType
 from rich.highlighter import ReprHighlighter
+from rich.markup import escape
 from rich.rule import Rule
 from rich.text import Text
 
@@ -40,7 +41,9 @@ def render_tool_approval(
 
     def add_view_content(view_content: ToolCallContent) -> None:
         if view_content.title:
-            renderables.append(Text.from_markup(f"[bold]{view_content.title}[/bold]\n"))
+            renderables.append(
+                Text.from_markup(f"[bold]{escape(view_content.title)}[/bold]\n")
+            )
         if view_content.format == "markdown":
             renderables.append(transcript_markdown(view_content.content))
         else:

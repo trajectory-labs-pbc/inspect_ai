@@ -38,7 +38,7 @@ export const eventTitle = (event: EventType): string => {
       let title = event.view?.title || event.function;
       if (event.view?.title) {
         title = title.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
-          key in event.arguments ? String(event.arguments[key]) : match,
+          Object.hasOwn(event.arguments, key) ? String(event.arguments[key]) : match,
         );
       }
       return `Tool: ${title}`;
