@@ -29,6 +29,17 @@ export const eventSearchText = (node: EventNode): string[] => {
           }
         }
       }
+      // Model event error details (API errors, tracebacks)
+      if (event.error) {
+        if (typeof event.error === "string") {
+          texts.push(event.error);
+        } else if (event.error.message) {
+          texts.push(event.error.message);
+        }
+      }
+      if (event.traceback) {
+        texts.push(event.traceback);
+      }
       break;
     }
 
@@ -46,8 +57,15 @@ export const eventSearchText = (node: EventNode): string[] => {
           texts.push(JSON.stringify(event.result));
         }
       }
-      if (event.error?.message) {
-        texts.push(event.error.message);
+      if (event.error) {
+        if (typeof event.error === "string") {
+          texts.push(event.error);
+        } else if (event.error.message) {
+          texts.push(event.error.message);
+        }
+      }
+      if (event.traceback) {
+        texts.push(event.traceback);
       }
       if (event.view?.content) {
         const substituted = substituteToolCallContent(
