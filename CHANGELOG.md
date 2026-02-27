@@ -12,6 +12,7 @@
 - Anthropic: Support ANTHROPIC_AUTH_TOKEN for OAuth Bearer authentication.
 - Anthropic: Enable `computer_20251124` tool version (with zoom) for Claude Sonnet 4.6.
 - vLLM: Support for LoRA (Low-Rank Adaptation) via `--enable-lora` server option and LoRA-tuned server startup logic.
+- Tools: Enable parameter placeholders in tool views.
 - OpenRouter: Improved capture of reasoning summaries for Gemini models.
 - Scoring: Add `math()` scorer which handles comparing mathematical expressions.
 - ReAct Agent: Break out of `react()` agent loop if the model refuses three times without choosing to call the `submit()` tool. 
