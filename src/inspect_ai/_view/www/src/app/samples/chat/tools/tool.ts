@@ -2,7 +2,7 @@ import "prismjs/components/prism-bash";
 import "prismjs/components/prism-json";
 import "prismjs/components/prism-python";
 
-import { Arguments1 } from "../../../../@types/log";
+import { Arguments1, ToolCallContent } from "../../../../@types/log";
 
 export const kToolTodoContentType = "agent/todo-list";
 export interface ToolCallResult {
@@ -175,4 +175,24 @@ const extractInput = (
       args: formattedArgs,
     };
   }
+};
+
+/**
+ * Substitute `{{param_name}}` placeholders in a ToolCallContent from arguments.
+ * Unmatched placeholders are left as-is.
+ */
+export const substituteToolCallContent = (
+  content: ToolCallContent,
+  args: Record<string, unknown>,
+): ToolCallContent => {
+  const replace = (text: string): string =>
+    text.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
+      key in args ? String(args[key]) : match,
+    );
+
+  return {
+    ...content,
+    title: content.title ? replace(content.title) : content.title,
+    content: replace(content.content),
+  };
 };

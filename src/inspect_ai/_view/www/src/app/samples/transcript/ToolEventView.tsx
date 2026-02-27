@@ -1,6 +1,6 @@
 import { ApprovalEvent, ModelEvent, ToolEvent } from "../../../@types/log";
 import { ApplicationIcons } from "../../appearance/icons";
-import { resolveToolInput } from "../chat/tools/tool";
+import { resolveToolInput, substituteToolCallContent } from "../chat/tools/tool";
 import { ToolCallView } from "../chat/tools/ToolCallView";
 import { ApprovalEventView } from "./ApprovalEventView";
 import { EventPanel } from "./event/EventPanel";
@@ -80,7 +80,14 @@ export const ToolEventView: FC<ToolEventViewProps> = ({
           contentType={contentType}
           output={event.error?.message || event.result}
           mode="compact"
-          view={event.view ? event.view : undefined}
+          view={
+            event.view
+              ? substituteToolCallContent(
+                  event.view,
+                  event.arguments as Record<string, unknown>,
+                )
+              : undefined
+          }
         />
 
         {lastModelNode ? (

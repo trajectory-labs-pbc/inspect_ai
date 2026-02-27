@@ -34,8 +34,15 @@ export const eventTitle = (event: EventType): string => {
       return event.role
         ? `Model Call (${event.role}): ${event.model}`
         : `Model Call: ${event.model}`;
-    case "tool":
-      return `Tool: ${event.view?.title || event.function}`;
+    case "tool": {
+      let title = event.view?.title || event.function;
+      if (event.view?.title) {
+        title = title.replace(/\{\{(\w+)\}\}/g, (match, key: string) =>
+          key in event.arguments ? String(event.arguments[key]) : match,
+        );
+      }
+      return `Tool: ${title}`;
+    }
     case "error":
       return "Error";
     case "logger":
