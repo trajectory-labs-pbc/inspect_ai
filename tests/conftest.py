@@ -70,6 +70,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "slow: mark test as slow to run")
     config.addinivalue_line("markers", "api: mark test as requiring API access")
     config.addinivalue_line("markers", "flaky: mark test as flaky/unreliable")
+    os.environ["INSPECT_EVAL_LOG_MODEL_API"] = "1"
 
 
 def pytest_collection_modifyitems(config, items):
