@@ -14,6 +14,7 @@
 - vLLM: Support for LoRA (Low-Rank Adaptation) via `--enable-lora` server option and LoRA-tuned server startup logic.
 - OpenRouter: Improved capture of reasoning summaries for Gemini models.
 - Scoring: Add `math()` scorer which handles comparing mathematical expressions.
+- ReAct Agent: Break out of `react()` agent loop if the model refuses three times without choosing to call the `submit()` tool. 
 - Agent Bridge: Only require `openai` package when bridging the openai completions or reaponses API.
 - Sandbox Tools: Increase server startup timeout from 20 seconds to 120 seconds.
 - Timelines: Improve agent detection logic in `timeline_build()`.
