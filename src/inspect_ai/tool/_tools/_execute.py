@@ -9,12 +9,15 @@ def code_viewer(
     language: str, code_param: str, title: str | None = None
 ) -> ToolCallViewer:
     title = title or language
-    # Build template once — {{code_param}} is resolved at render time from arguments
-    placeholder = "{{" + code_param + "}}"
-    content = "```" + language + "\n" + placeholder + "\n```\n"
 
     def viewer(tool_call: ToolCall) -> ToolCallView:
-        call = ToolCallContent(title=title, format="markdown", content=content)
+        code = tool_call.arguments.get(code_param, None)
+        code = str(code or tool_call.function).strip()
+        call = ToolCallContent(
+            title=title,
+            format="markdown",
+            content=f"```{language}\n" + code + "\n```\n",
+        )
         return ToolCallView(call=call)
 
     return viewer
