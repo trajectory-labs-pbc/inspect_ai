@@ -460,7 +460,7 @@ class AnthropicAPI(ModelAPI):
                     request, streaming, tools, config
                 )
             except (BadRequestError, APIStatusError) as ex:
-                model_call.set_response(
+                model_call.set_error(
                     as_error_response(ex.body), self._http_hooks.end_request(request_id)
                 )
                 raise ex
