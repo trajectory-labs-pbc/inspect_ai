@@ -7,14 +7,15 @@ from inspect_ai.model._model_call import ModelCall
 from inspect_ai.solver import generate
 
 
-def test_log_model_api_default_strips_call():
-    """By default (log_model_api=False), model call data is stripped."""
+def test_log_model_api_false_strips_call():
+    """When log_model_api=False, model call data is stripped."""
     log = eval(
         Task(
             dataset=[Sample(input="Say hello")],
             solver=[generate()],
         ),
         model="mockllm/model",
+        log_model_api=False,
     )[0]
     assert log.samples
     model_events = [

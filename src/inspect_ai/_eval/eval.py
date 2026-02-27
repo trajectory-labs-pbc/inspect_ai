@@ -667,6 +667,12 @@ async def _eval_async_inner(
         if epochs is not None and epochs.epochs < 1:
             raise ValueError("epochs must be a positive integer.")
 
+        # resolve log_model_api from env var if not explicitly set
+        if log_model_api is None:
+            log_model_api_env = os.environ.get("INSPECT_EVAL_LOG_MODEL_API")
+            if log_model_api_env is not None:
+                log_model_api = log_model_api_env.lower() in ("true", "1", "yes")
+
         # create config
         epochs_reducer = epochs.reducer if epochs else None
         eval_config = EvalConfig(
@@ -1113,6 +1119,11 @@ async def eval_retry_async(
         log_images = (
             log_images if log_images is not None else eval_log.eval.config.log_images
         )
+        # resolve log_model_api from env var if not explicitly set
+        if log_model_api is None:
+            log_model_api_env = os.environ.get("INSPECT_EVAL_LOG_MODEL_API")
+            if log_model_api_env is not None:
+                log_model_api = log_model_api_env.lower() in ("true", "1", "yes")
         log_model_api = (
             log_model_api
             if log_model_api is not None
