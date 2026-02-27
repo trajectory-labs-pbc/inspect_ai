@@ -10,9 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from inspect_ai._lfs.client import LFSDownloadInfo
+from inspect_ai._lfs._client import LFSDownloadInfo
+from inspect_ai._lfs._pointer import LFS_POINTER_VERSION
 from inspect_ai._lfs.exceptions import LFSResolverError
-from inspect_ai._lfs.pointer import LFS_POINTER_VERSION
 from inspect_ai._lfs.resolver import resolve_lfs_directory
 
 FAKE_REPO_URL = "https://github.com/example/repo.git"
