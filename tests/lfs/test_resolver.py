@@ -52,8 +52,8 @@ def _configure_lfs_mocks(
     mock_download.side_effect = _download
 
 
-_PATCH_FETCH = patch("inspect_ai._lfs.cache.fetch_download_urls")
-_PATCH_DOWNLOAD = patch("inspect_ai._lfs.cache.download_lfs_object")
+_PATCH_FETCH = patch("inspect_ai._lfs._cache.fetch_download_urls")
+_PATCH_DOWNLOAD = patch("inspect_ai._lfs._cache.download_lfs_object")
 
 
 def test_real_files_returns_source_dir(tmp_path: Path) -> None:
