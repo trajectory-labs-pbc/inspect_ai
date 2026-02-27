@@ -10,6 +10,7 @@
 - OpenAI: Pass through `phase` for gpt-5.3-codex models.
 - OpenAI Compatible: Re-create closed httpx client after disconnect.
 - Anthropic: Support ANTHROPIC_AUTH_TOKEN for OAuth Bearer authentication.
+- Anthropic: Enable `computer_20251124` tool version (with zoom) for Claude Sonnet 4.6.
 - vLLM: Support for LoRA (Low-Rank Adaptation) via `--enable-lora` server option and LoRA-tuned server startup logic.
 - OpenRouter: Improved capture of reasoning summaries for Gemini models.
 - Scoring: Add `math()` scorer which handles comparing mathematical expressions.
@@ -19,6 +20,7 @@
 - Performance: Share a single `AsyncFilesystem` via ContextVar within each async context, eliminating redundant S3 client creation and connection pool fragmentation.
 - Inspect View: Improve virtualized find in transcript by matching event titles as well as contents.
 - Testing: Migrate async tests from pytest-asyncio to anyio, enabling dual-backend (asyncio/trio) test execution via `--runtrio` flag.
+- Testing: Run `--runtrio` as trio-only in a separate process to prevent cross-backend global state contamination; convert batch tests from asyncio to anyio.
 - Bugfix: Strip surrounding quotes from S3 ETag in `.eval` header-only reads so it is consistent with full reads.
 
 ## 0.3.183 (24 February 2026)
@@ -98,6 +100,7 @@
 - Inspect View: Improve transcript display appearance in VSCode.
 - Inspect View: Improve log events display in transcripts.
 - Bugfix: Fix off-by-one in `_read_all_summaries` that skipped the last sample summary.
+- Inspect View: Fix stale state read in logsSlice after syncLogs.
 
 ## 0.3.177 (10 February 2026)
 
