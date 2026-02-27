@@ -29,6 +29,17 @@ export const eventSearchText = (node: EventNode): string[] => {
           }
         }
       }
+      // Model event error details (API errors, tracebacks)
+      if (event.error) {
+        if (typeof event.error === "string") {
+          texts.push(event.error);
+        } else if (event.error.message) {
+          texts.push(event.error.message);
+        }
+      }
+      if (event.traceback) {
+        texts.push(event.traceback);
+      }
       break;
     }
 
