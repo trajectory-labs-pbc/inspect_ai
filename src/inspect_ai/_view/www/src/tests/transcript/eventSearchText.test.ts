@@ -285,7 +285,7 @@ describe("eventSearchText", () => {
     expect(texts).toContain("solver: evaluate");
   });
 
-  test("span_begin: includes 'Step: name' when no type", () => {
+  test("span_begin: uses 'Init' override for init name", () => {
     const texts = eventSearchText(
       makeNode({
         event: "span_begin",
@@ -294,7 +294,19 @@ describe("eventSearchText", () => {
         timestamp: "2024-01-01T00:00:00Z",
       }),
     );
-    expect(texts).toContain("Step: init");
+    expect(texts).toContain("Init");
+  });
+
+  test("span_begin: includes 'Step: name' when no type and no override", () => {
+    const texts = eventSearchText(
+      makeNode({
+        event: "span_begin",
+        name: "my_span",
+        type: null,
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+    );
+    expect(texts).toContain("Step: my_span");
   });
 
   test("compaction: includes 'Compaction' title", () => {

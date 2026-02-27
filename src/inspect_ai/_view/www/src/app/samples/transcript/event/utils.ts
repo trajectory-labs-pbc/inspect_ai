@@ -17,6 +17,7 @@ import {
   formatNumber,
   formatTime,
 } from "../../../../utils/format";
+import { kSandboxSignalName } from "../transform/fixups";
 import { EventType } from "../types";
 
 const sampleLimitTitles: Record<string, string> = {
@@ -68,6 +69,9 @@ export const eventTitle = (event: EventType): string => {
     }
     case "step": {
       const e = event as StepEvent;
+      if (e.name === kSandboxSignalName) return "Sandbox Events";
+      if (e.name === "init") return "Init";
+      if (e.name === "sample_init") return "Sample Init";
       return e.type ? `${e.type}: ${e.name}` : `Step: ${e.name}`;
     }
     case "subtask": {
@@ -76,6 +80,9 @@ export const eventTitle = (event: EventType): string => {
     }
     case "span_begin": {
       const e = event as SpanBeginEvent;
+      if (e.span_id === kSandboxSignalName) return "Sandbox Events";
+      if (e.name === "init") return "Init";
+      if (e.name === "sample_init") return "Sample Init";
       return e.type ? `${e.type}: ${e.name}` : `Step: ${e.name}`;
     }
     case "score":
