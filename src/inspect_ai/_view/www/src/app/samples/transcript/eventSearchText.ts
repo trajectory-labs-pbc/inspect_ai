@@ -15,11 +15,10 @@ import {
   SandboxEvent,
   ScoreEditEvent,
   ScoreEvent,
-  SpanBeginEvent,
-  StepEvent,
   SubtaskEvent,
   ToolEvent,
 } from "../../../@types/log";
+import { eventTitle } from "./event/utils";
 import { EventNode } from "./types";
 
 /**
@@ -29,14 +28,14 @@ export const eventSearchText = (node: EventNode): string[] => {
   const texts: string[] = [];
   const event = node.event;
 
+  const title = eventTitle(event);
+  if (title) {
+    texts.push(title);
+  }
+
   switch (event.event) {
     case "model": {
       const modelEvent = event as ModelEvent;
-      if (modelEvent.role) {
-        texts.push(`Model Call (${modelEvent.role}): ${modelEvent.model}`);
-      } else {
-        texts.push(`Model Call: ${modelEvent.model}`);
-      }
       if (modelEvent.output?.choices) {
         for (const choice of modelEvent.output.choices) {
           texts.push(...extractContentText(choice.message.content));
@@ -54,7 +53,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "tool": {
       const toolEvent = event as ToolEvent;
-      texts.push(`Tool: ${toolEvent.view?.title || toolEvent.function}`);
       if (toolEvent.function) {
         texts.push(toolEvent.function);
       }
@@ -76,7 +74,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "error": {
       const errorEvent = event as ErrorEvent;
-      texts.push("Error");
       if (errorEvent.error?.message) {
         texts.push(errorEvent.error.message);
       }
@@ -88,9 +85,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "logger": {
       const loggerEvent = event as LoggerEvent;
-      if (loggerEvent.message?.level) {
-        texts.push(loggerEvent.message.level);
-      }
       if (loggerEvent.message?.message) {
         texts.push(loggerEvent.message.message);
       }
@@ -102,10 +96,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "info": {
       const infoEvent = event as InfoEvent;
-      texts.push("Info");
-      if (infoEvent.source) {
-        texts.push(infoEvent.source);
-      }
       if (infoEvent.data) {
         if (typeof infoEvent.data === "string") {
           texts.push(infoEvent.data);
@@ -118,7 +108,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "compaction": {
       const compactionEvent = event as CompactionEvent;
-      texts.push("Compaction");
       if (compactionEvent.source) {
         texts.push(compactionEvent.source);
       }
@@ -126,23 +115,8 @@ export const eventSearchText = (node: EventNode): string[] => {
       break;
     }
 
-    case "step": {
-      const stepEvent = event as StepEvent;
-      texts.push(
-        stepEvent.type
-          ? `${stepEvent.type}: ${stepEvent.name}`
-          : `Step: ${stepEvent.name}`,
-      );
-      break;
-    }
-
     case "subtask": {
       const subtaskEvent = event as SubtaskEvent;
-      texts.push(
-        subtaskEvent.type === "fork"
-          ? `Fork: ${subtaskEvent.name}`
-          : `Subtask: ${subtaskEvent.name}`,
-      );
       if (subtaskEvent.input) {
         texts.push(JSON.stringify(subtaskEvent.input));
       }
@@ -152,19 +126,8 @@ export const eventSearchText = (node: EventNode): string[] => {
       break;
     }
 
-    case "span_begin": {
-      const spanEvent = event as SpanBeginEvent;
-      texts.push(
-        spanEvent.type
-          ? `${spanEvent.type}: ${spanEvent.name}`
-          : `Step: ${spanEvent.name}`,
-      );
-      break;
-    }
-
     case "score": {
       const scoreEvent = event as ScoreEvent;
-      texts.push((scoreEvent.intermediate ? "Intermediate " : "") + "Score");
       if (scoreEvent.score.answer) {
         texts.push(scoreEvent.score.answer);
       }
@@ -189,7 +152,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "score_edit": {
       const scoreEditEvent = event as ScoreEditEvent;
-      texts.push("Edit Score");
       if (scoreEditEvent.edit.answer) {
         texts.push(scoreEditEvent.edit.answer);
       }
@@ -209,7 +171,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "sample_init": {
       const sampleInitEvent = event as SampleInitEvent;
-      texts.push("Sample");
       if (sampleInitEvent.sample.target) {
         const target = Array.isArray(sampleInitEvent.sample.target)
           ? sampleInitEvent.sample.target.join("\n")
@@ -221,16 +182,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "sample_limit": {
       const sampleLimitEvent = event as SampleLimitEvent;
-      const limitTitles: Record<string, string> = {
-        custom: "Custom Limit Exceeded",
-        time: "Time Limit Exceeded",
-        message: "Message Limit Exceeded",
-        token: "Token Limit Exceeded",
-        operator: "Operator Canceled",
-        working: "Execution Time Limit Exceeded",
-        cost: "Cost Limit Exceeded",
-      };
-      texts.push(limitTitles[sampleLimitEvent.type] ?? sampleLimitEvent.type);
       if (sampleLimitEvent.message) {
         texts.push(sampleLimitEvent.message);
       }
@@ -239,7 +190,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "input": {
       const inputEvent = event as InputEvent;
-      texts.push("Input");
       if (inputEvent.input_ansi) {
         texts.push(inputEvent.input_ansi);
       }
@@ -248,16 +198,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "approval": {
       const approvalEvent = event as ApprovalEvent;
-      const decisionLabels: Record<string, string> = {
-        approve: "Approved",
-        reject: "Rejected",
-        terminate: "Terminated",
-        escalate: "Escalated",
-        modify: "Modified",
-      };
-      texts.push(
-        decisionLabels[approvalEvent.decision] ?? approvalEvent.decision,
-      );
       if (approvalEvent.explanation) {
         texts.push(approvalEvent.explanation);
       }
@@ -266,7 +206,6 @@ export const eventSearchText = (node: EventNode): string[] => {
 
     case "sandbox": {
       const sandboxEvent = event as SandboxEvent;
-      texts.push(`Sandbox: ${sandboxEvent.action}`);
       if (sandboxEvent.cmd) {
         texts.push(sandboxEvent.cmd);
       }

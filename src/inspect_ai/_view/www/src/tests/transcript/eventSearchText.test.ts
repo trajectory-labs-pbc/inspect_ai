@@ -224,7 +224,7 @@ describe("eventSearchText", () => {
     expect(texts).toContain("disk space low");
   });
 
-  test("info: includes 'Info' title", () => {
+  test("info: includes 'Info' title with source", () => {
     const texts = eventSearchText(
       makeNode({
         event: "info",
@@ -233,8 +233,20 @@ describe("eventSearchText", () => {
         timestamp: "2024-01-01T00:00:00Z",
       }),
     );
+    expect(texts).toContain("Info: system");
+    expect(texts).toContain("startup complete");
+  });
+
+  test("info: includes 'Info' title without source", () => {
+    const texts = eventSearchText(
+      makeNode({
+        event: "info",
+        source: null,
+        data: "startup complete",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+    );
     expect(texts).toContain("Info");
-    expect(texts).toContain("system");
   });
 
   test("sample_init: includes 'Sample' title", () => {

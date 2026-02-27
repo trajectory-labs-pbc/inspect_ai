@@ -3,7 +3,7 @@ import { FC, useMemo } from "react";
 import { SpanBeginEvent } from "../../../@types/log";
 import { formatDateTime } from "../../../utils/format";
 import { EventPanel } from "./event/EventPanel";
-import { formatTitle } from "./event/utils";
+import { eventTitle, formatTitle } from "./event/utils";
 import { kSandboxSignalName } from "./transform/fixups";
 import { EventNode, EventType } from "./types";
 
@@ -23,9 +23,7 @@ export const SpanEventView: FC<SpanEventViewProps> = ({
 }) => {
   const event = eventNode.event;
   const descriptor = spanDescriptor(event);
-  const title =
-    descriptor.name ||
-    `${event.type ? event.type + ": " : "Step: "}${event.name}`;
+  const title = descriptor.name || eventTitle(event);
 
   const text = useMemo(() => summarize(children), [children]);
   const childIds = useMemo(() => children.map((child) => child.id), [children]);

@@ -3,7 +3,7 @@ import { FC } from "react";
 import { StepEvent } from "../../../@types/log";
 import { formatDateTime } from "../../../utils/format";
 import { EventPanel } from "./event/EventPanel";
-import { formatTitle } from "./event/utils";
+import { eventTitle, formatTitle } from "./event/utils";
 import { kSandboxSignalName } from "./transform/fixups";
 import { EventNode, EventType } from "./types";
 
@@ -23,9 +23,7 @@ export const StepEventView: FC<StepEventViewProps> = ({
 }) => {
   const event = eventNode.event;
   const descriptor = stepDescriptor(event);
-  const title =
-    descriptor.name ||
-    `${event.type ? event.type + ": " : "Step: "}${event.name}`;
+  const title = descriptor.name || eventTitle(event);
   const text = summarize(children);
 
   return (
