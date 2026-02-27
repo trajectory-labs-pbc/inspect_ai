@@ -29,6 +29,17 @@ export const eventSearchText = (node: EventNode): string[] => {
           }
         }
       }
+      // Model event error details (API errors, tracebacks)
+      if (event.error) {
+        if (typeof event.error === "string") {
+          texts.push(event.error);
+        } else if (event.error.message) {
+          texts.push(event.error.message);
+        }
+      }
+      if (event.traceback) {
+        texts.push(event.traceback);
+      }
       break;
     }
 
@@ -36,15 +47,11 @@ export const eventSearchText = (node: EventNode): string[] => {
       if (event.function) {
         texts.push(event.function);
       }
-      if (event.arguments) {
-        texts.push(JSON.stringify(event.arguments));
+      if (event.arguments && typeof event.arguments === "string") {
+        texts.push(event.arguments);
       }
-      if (event.result) {
-        if (typeof event.result === "string") {
-          texts.push(event.result);
-        } else {
-          texts.push(JSON.stringify(event.result));
-        }
+      if (event.result && typeof event.result === "string") {
+        texts.push(event.result);
       }
       if (event.error?.message) {
         texts.push(event.error.message);

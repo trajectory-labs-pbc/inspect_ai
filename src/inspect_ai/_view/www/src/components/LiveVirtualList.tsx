@@ -4,6 +4,7 @@ import {
   RefObject,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -13,6 +14,9 @@ import { useRafThrottle, useVirtuosoState } from "../state/scrolling";
 import {
   ExtendedFindFn,
   ExtendedCountFn,
+  ExtendedMatchIndexFn,
+  ExtendedScrollToIndexFn,
+  MatchLocation,
   useExtendedFind,
 } from "./ExtendedFindContext";
 import { PulsingDots } from "./PulsingDots";
@@ -75,7 +79,12 @@ export const LiveVirtualList = <T,>({
   const { getRestoreState, isScrolling, visibleRange, setVisibleRange } =
     useVirtuosoState(listHandle, `live-virtual-list-${id}`);
 
-  const { registerVirtualList, registerMatchCounter } = useExtendedFind();
+  const {
+    registerVirtualList,
+    registerMatchCounter,
+    registerMatchIndexer,
+    registerIndexScroller,
+  } = useExtendedFind();
   const pendingSearchCallback = useRef<(() => void) | null>(null);
   const [isCurrentlyScrolling, setIsCurrentlyScrolling] = useState(false);
 
@@ -296,19 +305,59 @@ export const LiveVirtualList = <T,>({
     [data, itemSearchText, defaultItemSearchText],
   );
 
+  // Build ordered match index: one entry per matching item.
+  // Within each item, window.find() handles individual occurrence cycling.
+  const buildMatchIndexInData: ExtendedMatchIndexFn = useCallback(
+    (term: string): MatchLocation[] => {
+      if (!term || !data.length) return [];
+      const lower = term.toLowerCase();
+      const matches: MatchLocation[] = [];
+      const getSearchText = itemSearchText ?? defaultItemSearchText;
+
+      for (let itemIndex = 0; itemIndex < data.length; itemIndex++) {
+        const texts = getSearchText(data[itemIndex]);
+        const textArray = Array.isArray(texts) ? texts : [texts];
+        const hasMatch = textArray.some((text) =>
+          text.toLowerCase().includes(lower),
+        );
+        if (hasMatch) {
+          matches.push({ listId: id, itemIndex, occurrenceInItem: 0 });
+        }
+      }
+      return matches;
+    },
+    [data, itemSearchText, defaultItemSearchText, id],
+  );
+
+  // Scroll to a specific item index (used by deterministic match navigation).
+  const scrollToItemIndex: ExtendedScrollToIndexFn = useCallback(
+    (index: number, onContentReady: () => void) => {
+      scrollToMatch(index, onContentReady);
+    },
+    [scrollToMatch],
+  );
+
   useEffect(() => {
     const unregisterSearch = registerVirtualList(id, searchInData);
     const unregisterCount = registerMatchCounter(id, countMatchesInData);
+    const unregisterIndexer = registerMatchIndexer(id, buildMatchIndexInData);
+    const unregisterScroller = registerIndexScroller(id, scrollToItemIndex);
     return () => {
       unregisterSearch();
       unregisterCount();
+      unregisterIndexer();
+      unregisterScroller();
     };
   }, [
     id,
     registerVirtualList,
     registerMatchCounter,
+    registerMatchIndexer,
+    registerIndexScroller,
     searchInData,
     countMatchesInData,
+    buildMatchIndexInData,
+    scrollToItemIndex,
   ]);
 
   const Footer = () => {

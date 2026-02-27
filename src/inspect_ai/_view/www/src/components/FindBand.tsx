@@ -12,7 +12,7 @@ import { ApplicationIcons } from "../app/appearance/icons";
 import { useStore } from "../state/store";
 import { findScrollableParent, scrollRangeToCenter } from "../utils/dom";
 import { debounce } from "../utils/sync";
-import { useExtendedFind } from "./ExtendedFindContext";
+import { MatchLocation, useExtendedFind } from "./ExtendedFindContext";
 import "./FindBand.css";
 
 interface FindBandProps {}
@@ -28,7 +28,8 @@ const findConfig = {
 export const FindBand: FC<FindBandProps> = () => {
   const searchBoxRef = useRef<HTMLInputElement>(null);
   const storeHideFind = useStore((state) => state.appActions.hideFind);
-  const { extendedFindTerm, countAllMatches } = useExtendedFind();
+  const { extendedFindTerm, getAllMatchLocations, scrollToMatchLocation } =
+    useExtendedFind();
   const lastFoundItem = useRef<{
     text: string;
     offset: number;
@@ -39,9 +40,9 @@ export const FindBand: FC<FindBandProps> = () => {
   const scrollTimeoutRef = useRef<number | null>(null);
   const focusTimeoutRef = useRef<number | null>(null);
   const searchIdRef = useRef(0);
-  const cachedCount = useRef<{ term: string; count: number }>({
+  const cachedMatches = useRef<{ term: string; matches: MatchLocation[] }>({
     term: "",
-    count: 0,
+    matches: [],
   });
   const mutatedPanelsRef = useRef<
     Map<
@@ -57,6 +58,7 @@ export const FindBand: FC<FindBandProps> = () => {
 
   const [matchCount, setMatchCount] = useState<number | null>(null);
   const [currentMatchIndex, setCurrentMatchIndex] = useState(0);
+  const currentMatchIndexRef = useRef(0);
 
   const getParentExpandablePanel = useCallback(
     (selection: Selection): HTMLElement | undefined => {
@@ -75,6 +77,120 @@ export const FindBand: FC<FindBandProps> = () => {
     [],
   );
 
+  const getMatchesForTerm = useCallback(
+    (term: string): MatchLocation[] => {
+      if (cachedMatches.current.term === term) {
+        return cachedMatches.current.matches;
+      }
+      const matches = getAllMatchLocations(term);
+      cachedMatches.current = { term, matches };
+      return matches;
+    },
+    [getAllMatchLocations],
+  );
+
+  // Navigate to the next/prev match. Uses item-level navigation with
+  // window.find() for intra-item cycling.
+  const goToMatchLocation = useCallback(
+    async (term: string, match: MatchLocation): Promise<boolean> => {
+      return new Promise<boolean>((resolve) => {
+        const onContentReady = () => {
+          let retries = 0;
+          const maxRetries = 10;
+          const tryHighlight = () => {
+            const itemRoot = document.querySelector(
+              `[data-item-index="${match.itemIndex}"]`,
+            ) as HTMLElement | null;
+            if (!itemRoot) {
+              retries++;
+              if (retries < maxRetries) {
+                requestAnimationFrame(tryHighlight);
+                return;
+              }
+              resolve(false);
+              return;
+            }
+
+            // Anchor selection at the start of this item
+            const sel = window.getSelection();
+            if (!sel) {
+              resolve(false);
+              return;
+            }
+            const range = document.createRange();
+            range.selectNodeContents(itemRoot);
+            range.collapse(true);
+            sel.removeAllRanges();
+            sel.addRange(range);
+
+            // Call window.find() occurrenceInItem+1 times.
+            // But we count DOM occurrences, not data occurrences.
+            // So occurrenceInItem=0 means "first in this item DOM".
+            let found = false;
+            const maxFinds = match.occurrenceInItem + 1;
+            let findCount = 0;
+            for (let attempt = 0; attempt < maxFinds + 20; attempt++) {
+              found = windowFind(term, false);
+              if (!found) break;
+              if (sel.rangeCount) {
+                const r = sel.getRangeAt(0);
+                if (inUnsearchableElement(r)) {
+                  r.collapse(false);
+                  sel.removeAllRanges();
+                  sel.addRange(r);
+                  continue;
+                }
+                const parentEl =
+                  r.startContainer.parentElement ||
+                  (r.commonAncestorContainer as Element);
+                if (!itemRoot.contains(parentEl)) {
+                  found = false;
+                  break;
+                }
+              }
+              findCount++;
+              if (findCount > match.occurrenceInItem) break;
+            }
+
+            if (found && sel.rangeCount) {
+              const finalRange = sel.getRangeAt(0);
+              const parentPanel = getParentExpandablePanel(sel);
+              if (parentPanel) {
+                if (!mutatedPanelsRef.current.has(parentPanel)) {
+                  mutatedPanelsRef.current.set(parentPanel, {
+                    display: parentPanel.style.display,
+                    maxHeight: parentPanel.style.maxHeight,
+                    webkitLineClamp: parentPanel.style.webkitLineClamp,
+                    webkitBoxOrient: parentPanel.style.webkitBoxOrient,
+                  });
+                }
+                parentPanel.style.display = "block";
+                parentPanel.style.maxHeight = "none";
+                parentPanel.style.webkitLineClamp = "";
+                parentPanel.style.webkitBoxOrient = "";
+              }
+              if (scrollTimeoutRef.current !== null) {
+                window.clearTimeout(scrollTimeoutRef.current);
+              }
+              scrollTimeoutRef.current = window.setTimeout(() => {
+                scrollRangeToCenter(finalRange);
+              }, 100);
+            }
+
+            resolve(found);
+          };
+          requestAnimationFrame(tryHighlight);
+        };
+
+        const didScroll = scrollToMatchLocation(match, onContentReady);
+        if (!didScroll) {
+          setTimeout(onContentReady, 0);
+        }
+      });
+    },
+    [scrollToMatchLocation, getParentExpandablePanel],
+  );
+
   const handleSearch = useCallback(
     async (back = false) => {
       const thisSearchId = ++searchIdRef.current;
@@ -86,19 +202,17 @@ export const FindBand: FC<FindBandProps> = () => {
         return;
       }
 
-      if (currentSearchTerm.current !== searchTerm) {
+      const termChanged = currentSearchTerm.current !== searchTerm;
+      if (termChanged) {
         lastFoundItem.current = null;
         currentSearchTerm.current = searchTerm;
         setCurrentMatchIndex(0);
+        currentMatchIndexRef.current = 0;
+        cachedMatches.current = { term: "", matches: [] };
       }
 
-      let total: number;
-      if (cachedCount.current.term === searchTerm) {
-        total = cachedCount.current.count;
-      } else {
-        total = countAllMatches(searchTerm);
-        cachedCount.current = { term: searchTerm, count: total };
-      }
+      const matches = getMatchesForTerm(searchTerm);
+      const total = matches.length;
       setMatchCount(total);
 
       if (total === 0) {
@@ -106,93 +220,31 @@ export const FindBand: FC<FindBandProps> = () => {
         return;
       }
 
-      const focusedElement = document.activeElement as HTMLElement;
+      // Compute target match index (0-based)
+      const prevIndex0 =
+        currentMatchIndexRef.current > 0
+          ? currentMatchIndexRef.current - 1
+          : -1;
+      const targetIndex0 =
+        termChanged || prevIndex0 === -1
+          ? back
+            ? total - 1
+            : 0
+          : back
+            ? (prevIndex0 - 1 + total) % total
+            : (prevIndex0 + 1) % total;
 
-      const selection = window.getSelection();
-      let savedRange: Range | null = null;
-      if (selection && selection.rangeCount > 0) {
-        savedRange = selection.getRangeAt(0).cloneRange();
-      }
+      const targetMatch = matches[targetIndex0];
 
-      const savedScrollParent = savedRange
-        ? findScrollableParent(savedRange.startContainer.parentElement)
-        : null;
-      const savedScrollTop = savedScrollParent?.scrollTop ?? 0;
+      // Set the match index immediately — don't wait for goToMatchLocation.
+      // The match list is computed from data, so we know it's correct.
+      setCurrentMatchIndex(targetIndex0 + 1);
+      currentMatchIndexRef.current = targetIndex0 + 1;
 
-      const result = await findExtendedInDOM(
-        searchTerm,
-        back,
-        lastFoundItem.current,
-        extendedFindTerm,
-      );
-
-      if (searchIdRef.current !== thisSearchId) {
-        return;
-      }
-
-      if (!result && savedRange) {
-        const sel = window.getSelection();
-        if (sel) {
-          sel.removeAllRanges();
-          sel.addRange(savedRange);
-        }
-        if (savedScrollParent) {
-          savedScrollParent.scrollTop = savedScrollTop;
-        }
-      }
-
-      if (result) {
-        const selection = window.getSelection();
-        if (selection && selection.rangeCount > 0) {
-          const range = selection.getRangeAt(0);
-          const parentElement =
-            range.startContainer.parentElement ||
-            (range.commonAncestorContainer as Element);
-          const isNewMatch = !isLastFoundItem(range, lastFoundItem.current);
-          lastFoundItem.current = {
-            text: range.toString(),
-            offset: range.startOffset,
-            parentElement,
-          };
-
-          if (isNewMatch) {
-            setCurrentMatchIndex((prev) => {
-              if (back) {
-                return prev <= 1 ? total : prev - 1;
-              } else {
-                return prev >= total ? 1 : prev + 1;
-              }
-            });
-          }
-
-          const parentPanel = getParentExpandablePanel(selection);
-          if (parentPanel) {
-            if (!mutatedPanelsRef.current.has(parentPanel)) {
-              mutatedPanelsRef.current.set(parentPanel, {
-                display: parentPanel.style.display,
-                maxHeight: parentPanel.style.maxHeight,
-                webkitLineClamp: parentPanel.style.webkitLineClamp,
-                webkitBoxOrient: parentPanel.style.webkitBoxOrient,
-              });
-            }
-            parentPanel.style.display = "block";
-            parentPanel.style.maxHeight = "none";
-            parentPanel.style.webkitLineClamp = "";
-            parentPanel.style.webkitBoxOrient = "";
-          }
-
-          if (scrollTimeoutRef.current !== null) {
-            window.clearTimeout(scrollTimeoutRef.current);
-          }
-          scrollTimeoutRef.current = window.setTimeout(() => {
-            scrollRangeToCenter(range);
-          }, 100);
-        }
-      }
-
-      focusedElement?.focus();
+      if (searchIdRef.current !== thisSearchId) return;
+      await goToMatchLocation(searchTerm, targetMatch);
     },
-    [getParentExpandablePanel, extendedFindTerm, countAllMatches],
+    [getMatchesForTerm, goToMatchLocation],
   );
 
   useEffect(() => {
@@ -265,7 +317,7 @@ export const FindBand: FC<FindBandProps> = () => {
         await handleSearch(false);
         // Mark for cursor restore on next keypress (keeps find highlight visible)
         needsCursorRestoreRef.current = true;
-      }, 300),
+      }, 100),
     [handleSearch],
   );
 
@@ -274,14 +326,10 @@ export const FindBand: FC<FindBandProps> = () => {
   }, [debouncedSearch]);
 
   const handleBeforeInput = useCallback(() => {
-    const input = searchBoxRef.current;
-    if (input) {
-      const hasSelection = input.selectionStart !== input.selectionEnd;
-      if (!hasSelection) {
-        restoreCursor();
-      }
-    }
-  }, [restoreCursor]);
+    // Clear the restore flag — the user is actively editing,
+    // so the cursor is already where they want it.
+    needsCursorRestoreRef.current = false;
+  }, []);
 
   // Consolidated global keyboard handler
   useEffect(() => {
@@ -318,12 +366,10 @@ export const FindBand: FC<FindBandProps> = () => {
       const input = searchBoxRef.current;
       if (!input) return;
 
-      const hasSelection = input.selectionStart !== input.selectionEnd;
-      if (!hasSelection) {
-        restoreCursor();
-      }
-
+      // Only restore cursor and focus if the input doesn't already have focus.
+      // If the user is actively editing in the input, don't move their cursor.
       if (document.activeElement !== input) {
+        restoreCursor();
         input.focus();
       }
     };
