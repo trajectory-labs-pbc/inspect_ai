@@ -160,8 +160,6 @@ class TestRenderToolApprovalEscaping:
         )
         assert len(result) > 0
         # Find the Text renderable containing the title (has "Run:" prefix)
-        title_texts = [
-            r for r in result if isinstance(r, Text) and "Run:" in r.plain
-        ]
+        title_texts = [r for r in result if isinstance(r, Text) and "Run:" in r.plain]
         assert len(title_texts) == 1
         assert "[bold]evil[/bold]" in title_texts[0].plain
