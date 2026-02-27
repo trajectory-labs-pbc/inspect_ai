@@ -1,6 +1,9 @@
 import { ApprovalEvent, ModelEvent, ToolEvent } from "../../../@types/log";
 import { ApplicationIcons } from "../../appearance/icons";
-import { resolveToolInput, substituteToolCallContent } from "../chat/tools/tool";
+import {
+  resolveToolInput,
+  substituteToolCallContent,
+} from "../chat/tools/tool";
 import { ToolCallView } from "../chat/tools/ToolCallView";
 import { ApprovalEventView } from "./ApprovalEventView";
 import { EventPanel } from "./event/EventPanel";
