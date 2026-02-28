@@ -263,7 +263,9 @@ class TimelineSpan(BaseModel):
     @property
     def idle_time(self) -> float:
         """Seconds of idle time within this span."""
-        return _compute_idle_time(self.content, self.start_time, self.end_time)
+        return _compute_idle_time(
+            self._content_and_branches(), self.start_time, self.end_time
+        )
 
 
 class TimelineBranch(BaseModel):
