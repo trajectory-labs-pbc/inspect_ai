@@ -1,4 +1,4 @@
-## Unreleased
+## 0.3.184 (28 February 2026)
 
 - Model API: By default, only log raw model api request/response when an error occurs. Override to log all model api calls with `--log-model-api`.
 - Model API: Truncate the model request to a maximum of 200 lines when printing to the console after an error.
