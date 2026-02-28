@@ -239,9 +239,7 @@ class TimelineSpan(BaseModel):
     def _content_and_branches(
         self,
     ) -> list[TimelineEvent | "TimelineSpan | TimelineBranch"]:
-        items: list[TimelineEvent | TimelineSpan | TimelineBranch] = list(
-            self.content
-        )
+        items: list[TimelineEvent | TimelineSpan | TimelineBranch] = list(self.content)
         items.extend(self.branches)
         return items
 
