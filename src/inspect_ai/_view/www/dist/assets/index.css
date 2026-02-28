@@ -16810,6 +16810,14 @@ button._segment_mhb7y_9 {
   margin-top: -0.1rem;
   margin-bottom: -0.1rem;
 }
+
+/* CSS Custom Highlight for find-in-page matches.
+   This is visible regardless of which element has focus,
+   unlike a regular Selection highlight. */
+::highlight(find-match) {
+  background-color: #ffff00;
+  color: #000;
+}
 ._tabs_1rv6h_1 {
   align-items: center;
 }
