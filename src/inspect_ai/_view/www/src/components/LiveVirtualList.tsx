@@ -74,7 +74,10 @@ function countMatchesInPanel(panelId: string, term: string): number {
 function expandParentExpandablePanel(selection: Selection): void {
   let node = selection.anchorNode;
   while (node) {
-    if (node instanceof HTMLElement && node.hasAttribute("data-expandable-panel")) {
+    if (
+      node instanceof HTMLElement &&
+      node.hasAttribute("data-expandable-panel")
+    ) {
       node.style.display = "block";
       node.style.maxHeight = "none";
       node.style.webkitLineClamp = "";
@@ -141,10 +144,7 @@ export const LiveVirtualList = <T,>({
   const { getRestoreState, isScrolling, visibleRange, setVisibleRange } =
     useVirtuosoState(listHandle, `live-virtual-list-${id}`);
 
-  const {
-    registerMatchCounter,
-    registerGoToMatch,
-  } = useExtendedFind();
+  const { registerMatchCounter, registerGoToMatch } = useExtendedFind();
   const pendingTargetRef = useRef<{
     index: number;
     resolve: () => void;
@@ -329,7 +329,10 @@ export const LiveVirtualList = <T,>({
     (index: number): Promise<void> => {
       return new Promise((resolve) => {
         const currentRange = visibleRangeRef.current;
-        if (index >= currentRange.startIndex && index <= currentRange.endIndex) {
+        if (
+          index >= currentRange.startIndex &&
+          index <= currentRange.endIndex
+        ) {
           requestAnimationFrame(() => resolve());
           return;
         }
@@ -384,7 +387,11 @@ export const LiveVirtualList = <T,>({
       if (!term || typeof Highlight === "undefined" || !CSS?.highlights) return;
       const allRanges: StaticRange[] = [];
       const range = visibleRangeRef.current;
-      for (let i = range.startIndex; i <= range.endIndex && i < data.length; i++) {
+      for (
+        let i = range.startIndex;
+        i <= range.endIndex && i < data.length;
+        i++
+      ) {
         const nodeId = (data[i] as { id?: string }).id;
         if (!nodeId) continue;
         const panelId = "event-panel-" + nodeId;
@@ -401,7 +408,6 @@ export const LiveVirtualList = <T,>({
     },
     [data],
   );
-
 
   // Navigate to the nth match (1-based). Uses data-level counts to locate
   // the target item WITHOUT scrolling, then scrolls to ONLY that item and
@@ -606,7 +612,11 @@ export const LiveVirtualList = <T,>({
                 window.getSelection()?.removeAllRanges();
               }
             }
-            rebuildVisibleHighlights(term, highlight?.occurrence, highlight?.panelId);
+            rebuildVisibleHighlights(
+              term,
+              highlight?.occurrence,
+              highlight?.panelId,
+            );
           });
         }
       }}
