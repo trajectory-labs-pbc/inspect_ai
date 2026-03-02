@@ -89,6 +89,7 @@ export const TranscriptVirtualList: FC<TranscriptVirtualListProps> = memo(
 export interface EventNodeContext {
   hasToolEvents?: boolean;
   turnInfo?: { turnNumber: number; totalTurns: number };
+  nextVisualAction?: Record<string, unknown>;
 }
 
 interface RenderedEventNodeProps {

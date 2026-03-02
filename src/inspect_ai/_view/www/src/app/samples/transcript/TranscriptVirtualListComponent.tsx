@@ -8,8 +8,10 @@ import {
   useMemo,
   useRef,
 } from "react";
-import { RenderedEventNode } from "./TranscriptVirtualList";
+import { ToolEvent } from "../../../@types/log";
+import { EventNodeContext, RenderedEventNode } from "./TranscriptVirtualList";
 import { EventNode } from "./types";
+import { findNextVisualBrowserAction } from "../chat/tools/browserActionUtils";
 
 import { VirtuosoHandle } from "react-virtuoso";
 import { LiveVirtualList } from "../../../components/LiveVirtualList";
@@ -91,18 +93,13 @@ export const TranscriptVirtualListComponent: FC<
 
   // Pre-compute context objects for all event nodes to maintain stable references
   const contextMap = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        hasToolEvents: boolean;
-        turnInfo?: { turnNumber: number; totalTurns: number };
-      }
-    >();
+    const map = new Map<string, EventNodeContext>();
     for (let i = 0; i < eventNodes.length; i++) {
       const node = eventNodes[i];
       const hasToolEvents = hasToolEventsAtCurrentDepth(i);
       const turnInfo = turnMap?.get(node.id);
-      map.set(node.id, { hasToolEvents, turnInfo });
+      const nextVisualAction = computeNextVisualAction(eventNodes, i);
+      map.set(node.id, { hasToolEvents, turnInfo, nextVisualAction });
     }
     return map;
   }, [eventNodes, hasToolEventsAtCurrentDepth, turnMap]);
@@ -184,3 +181,41 @@ export const TranscriptVirtualListComponent: FC<
     );
   }
 };
+
+/**
+ * For a screenshot tool event at the given index, walk forward through the
+ * flat event list to find the next visual browser action (click/scroll/type).
+ * The annotation shows what is ABOUT TO happen on this screen — the
+ * coordinates refer to what's visible in THIS screenshot.
+ *
+ * The list interleaves model and tool events: model → tool → model → tool.
+ * We skip non-tool events and non-visual browser actions (get_page_text, etc.)
+ * that don't have coordinates, stopping at the next screenshot or visual action.
+ */
+function computeNextVisualAction(
+  eventNodes: EventNode[],
+  index: number,
+): Record<string, unknown> | undefined {
+  const node = eventNodes[index];
+  if (node.event.event !== "tool") return undefined;
+
+  const toolEvent = node.event as ToolEvent;
+  const args = toolEvent.arguments as Record<string, unknown>;
+  if (toolEvent.function !== "browser" || args?.action !== "screenshot") {
+    return undefined;
+  }
+
+  // Walk forward. The list includes span_begin, sandbox, model events between
+  // tool events. With ~7 sandbox events per tool span, we need up to ~20 steps
+  // to reach the next visual tool event after a non-visual one.
+  const browserArgs: Array<Record<string, unknown>> = [];
+  for (let i = index + 1; i < eventNodes.length && i <= index + 30; i++) {
+    const candidate = eventNodes[i];
+    if (candidate.event.event !== "tool") continue; // skip model/span/sandbox events
+    const candEvent = candidate.event as ToolEvent;
+    if (candEvent.function !== "browser") break; // stop at non-browser tools
+    browserArgs.push(candEvent.arguments as Record<string, unknown>);
+  }
+
+  return findNextVisualBrowserAction(browserArgs);
+}

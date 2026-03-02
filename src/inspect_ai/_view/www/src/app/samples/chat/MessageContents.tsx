@@ -7,6 +7,7 @@ import {
 import { MessageContent } from "./MessageContent";
 import { resolveToolInput, substituteToolCallContent } from "./tools/tool";
 import { ToolCallView } from "./tools/ToolCallView";
+import { findNextVisualBrowserAction } from "./tools/browserActionUtils";
 
 import clsx from "clsx";
 import { FC, Fragment } from "react";
@@ -54,7 +55,8 @@ export const MessageContents: FC<MessageContentsProps> = ({
     message.tool_calls.length
   ) {
     // Render the tool calls made by this message
-    const toolCalls = message.tool_calls.map((tool_call, idx) => {
+    const allToolCalls = message.tool_calls;
+    const toolCalls = allToolCalls.map((tool_call, idx) => {
       // Extract tool input
       const { input, description, functionCall, contentType } =
         resolveToolInput(tool_call.function, tool_call.arguments);
@@ -70,6 +72,28 @@ export const MessageContents: FC<MessageContentsProps> = ({
 
       // Resolve the tool output
       const resolvedToolOutput = resolveToolMessage(toolMessage);
+
+      // For screenshot tool calls, look FORWARD to find the next visual
+      // browser action (click/scroll/type). The annotation shows what is
+      // ABOUT TO happen on this screen. Skip non-visual actions like
+      // get_page_text that don't have coordinates.
+      let nextVisualAction: Record<string, unknown> | undefined;
+      if (
+        tool_call.function === "browser" &&
+        (tool_call.arguments as Record<string, unknown>)?.action ===
+          "screenshot"
+      ) {
+        const subsequentBrowserArgs: Array<Record<string, unknown>> = [];
+        for (let j = idx + 1; j < allToolCalls.length; j++) {
+          const nextCall = allToolCalls[j];
+          if (nextCall.function !== "browser") break;
+          subsequentBrowserArgs.push(
+            nextCall.arguments as Record<string, unknown>,
+          );
+        }
+        nextVisualAction = findNextVisualBrowserAction(subsequentBrowserArgs);
+      }
+
       if (toolCallStyle === "compact") {
         return (
           <div key={`tool-call-${idx}`}>
@@ -87,6 +111,7 @@ export const MessageContents: FC<MessageContentsProps> = ({
             key={`tool-call-${idx}`}
             functionCall={functionCall}
             input={input}
+            nextVisualAction={nextVisualAction}
             description={description}
             contentType={contentType}
             output={resolvedToolOutput}

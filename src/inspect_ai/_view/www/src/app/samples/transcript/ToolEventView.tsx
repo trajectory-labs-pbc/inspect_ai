@@ -79,6 +79,7 @@ export const ToolEventView: FC<ToolEventViewProps> = ({
           id={`${eventNode.id}-tool-call`}
           functionCall={functionCall}
           input={input}
+          nextVisualAction={context?.nextVisualAction}
           description={description}
           contentType={contentType}
           output={event.error?.message || event.result}
