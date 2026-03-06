@@ -58,6 +58,7 @@ export type MaxToolOutput = number | null;
 export type CachePrompt = "auto" | boolean | null;
 export type Verbosity = ("low" | "medium" | "high") | null;
 export type Effort = ("low" | "medium" | "high" | "max") | null;
+export type Speed = "fast" | null;
 export type ReasoningEffort =
   | ("none" | "minimal" | "low" | "medium" | "high" | "xhigh")
   | null;
@@ -227,6 +228,7 @@ export type InputTokensCacheWrite = number | null;
 export type InputTokensCacheRead = number | null;
 export type ReasoningTokens1 = number | null;
 export type TotalCost = number | null;
+export type Speed1 = string | null;
 export type Message = string;
 export type Traceback = string;
 export type TracebackAnsi = string;
@@ -998,6 +1000,7 @@ export interface GenerateConfig {
   cache_prompt: CachePrompt;
   verbosity: Verbosity;
   effort: Effort;
+  speed: Speed;
   reasoning_effort: ReasoningEffort;
   reasoning_tokens: ReasoningTokens;
   reasoning_summary: ReasoningSummary;
@@ -1203,6 +1206,7 @@ export interface GenerateConfig1 {
   cache_prompt: CachePrompt;
   verbosity: Verbosity;
   effort: Effort;
+  speed: Speed;
   reasoning_effort: ReasoningEffort;
   reasoning_tokens: ReasoningTokens;
   reasoning_summary: ReasoningSummary;
@@ -1297,6 +1301,7 @@ export interface ModelUsage1 {
   input_tokens_cache_read: InputTokensCacheRead;
   reasoning_tokens: ReasoningTokens1;
   total_cost: TotalCost;
+  speed: Speed1;
 }
 export interface RoleUsage {
   [k: string]: ModelUsage1;
