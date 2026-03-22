@@ -10,67 +10,70 @@ import {
  * Simulate the async rendering pipeline from MarkdownDiv.
  * This mirrors the steps in the renderQueue.enqueue callback.
  */
-function renderPipeline(markdown: string, omitMath = false): string {
+async function renderPipeline(
+  markdown: string,
+  omitMath = false,
+): Promise<string> {
   const protectedContent = protectBackslashesInLatex(markdown);
   const escaped = escapeHtmlCharacters(protectedContent);
   const preparedForMarkdown = restoreBackslashesForLatex(escaped);
 
-  const md = getMarkdownInstance(false, omitMath);
+  const md = await getMarkdownInstance(false, omitMath, !omitMath);
   return md.render(preparedForMarkdown);
 }
 
 describe("MarkdownDiv XSS security", () => {
   describe("script injection in LaTeX blocks", () => {
-    it("should not produce raw <script> tags from inline math", () => {
-      const result = renderPipeline("$<script>alert(1)</script>$");
+    it("should not produce raw <script> tags from inline math", async () => {
+      const result = await renderPipeline("$<script>alert(1)</script>$");
       expect(result).not.toContain("<script>");
       expect(result).not.toContain("</script>");
     });
 
-    it("should not produce raw <script> tags from block math", () => {
-      const result = renderPipeline("$$<script>alert(1)</script>$$");
+    it("should not produce raw <script> tags from block math", async () => {
+      const result = await renderPipeline("$$<script>alert(1)</script>$$");
       expect(result).not.toContain("<script>");
       expect(result).not.toContain("</script>");
     });
   });
 
   describe("event handler injection in LaTeX blocks", () => {
-    it("should not produce raw <img> with onerror from inline math", () => {
-      const result = renderPipeline('$<img src=x onerror="alert(1)">$');
+    it("should not produce raw <img> with onerror from inline math", async () => {
+      const result = await renderPipeline('$<img src=x onerror="alert(1)">$');
       expect(result).not.toContain("<img");
       expect(result).not.toContain("onerror");
     });
 
-    it("should not produce raw <img> with onerror from block math", () => {
-      const result = renderPipeline('$$<img src=x onerror="alert(1)">$$');
+    it("should not produce raw <img> with onerror from block math", async () => {
+      const result = await renderPipeline('$$<img src=x onerror="alert(1)">$$');
       expect(result).not.toContain("<img");
       expect(result).not.toContain("onerror");
     });
   });
 
   describe("script injection outside LaTeX", () => {
-    it("should escape <script> tags in plain text", () => {
-      const result = renderPipeline("<script>alert(1)</script>");
+    it("should escape <script> tags in plain text", async () => {
+      const result = await renderPipeline("<script>alert(1)</script>");
       expect(result).not.toContain("<script>");
     });
 
-    it("should escape event handlers in plain text", () => {
-      const result = renderPipeline('<img src=x onerror="alert(1)">');
+    it("should escape event handlers in plain text", async () => {
+      const result = await renderPipeline('<img src=x onerror="alert(1)">');
       // The text "onerror" may appear as escaped text, but no raw <img> tag
       expect(result).not.toContain("<img");
     });
   });
 
   describe("legitimate LaTeX still renders", () => {
-    it("should render inline math with backslashes", () => {
-      const result = renderPipeline("$\\frac{1}{2}$");
+    it("should render inline math with backslashes", async () => {
+      const result = await renderPipeline("$\\frac{1}{2}$");
       // MathJax should process this — output should contain mjx-container or similar
       // At minimum, the backslash commands should not be entity-encoded
       expect(result).not.toContain("___LATEX_BACKSLASH___");
     });
 
-    it("should render block math with backslashes", () => {
-      const result = renderPipeline("$$\\sum_{i=0}^{n} x_i$$");
+    it("should render block math with backslashes", async () => {
+      const result = await renderPipeline("$$\\sum_{i=0}^{n} x_i$$");
       expect(result).not.toContain("___LATEX_BACKSLASH___");
     });
 

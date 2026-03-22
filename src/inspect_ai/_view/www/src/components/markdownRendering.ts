@@ -4,7 +4,17 @@
  */
 
 import MarkdownIt from "markdown-it";
-import markdownitMathjax3 from "markdown-it-mathjax3";
+
+// Lazy-load mathjax plugin only when math content is detected
+let mathjaxPluginPromise: Promise<any> | null = null;
+const getMathjaxPlugin = (): Promise<any> => {
+  if (!mathjaxPluginPromise) {
+    mathjaxPluginPromise = import("markdown-it-mathjax3").then(
+      (m) => m.default,
+    );
+  }
+  return mathjaxPluginPromise;
+};
 
 // Module-level cache for lazy-initialized markdown-it instances
 const mdInstanceCache: Record<string, MarkdownIt> = {};
@@ -23,16 +33,20 @@ export const unescapeHtmlForMath = (content: string): string => {
     .replace(/&quot;/g, '"');
 };
 
-export const getMarkdownInstance = (
+export const getMarkdownInstance = async (
   omitMedia?: boolean,
   omitMath?: boolean,
-): MarkdownIt => {
-  const key = getOptionsKey(omitMedia, omitMath);
+  contentHasMath?: boolean,
+): Promise<MarkdownIt> => {
+  // If math should be rendered and content has math patterns, load mathjax
+  const useMath = !omitMath && contentHasMath;
+  const key = `${getOptionsKey(omitMedia, omitMath)}:${useMath ? "1" : "0"}`;
 
   if (!mdInstanceCache[key]) {
     const md = new MarkdownIt({ breaks: true, html: true });
-    if (!omitMath) {
-      md.use(markdownitMathjax3);
+    if (useMath) {
+      const mathjaxPlugin = await getMathjaxPlugin();
+      md.use(mathjaxPlugin);
 
       // Wrap math renderers to unescape HTML entities in TeX content
       // before MathJax processes them. HTML chars in LaTeX blocks are
