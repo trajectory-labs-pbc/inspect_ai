@@ -89,6 +89,14 @@ class MCPServerLocal(MCPServer):
         self._client = client
         self._name = name
         self._events = events
+        # Per-instance session table. Keyed on anyio task id, which is
+        # id(asyncio.current_task()) — a memory address that Python recycles
+        # once the task is GC'd. Storing this on the instance (rather than
+        # the class) means task-id collisions across different MCPServerLocal
+        # instances can't leak one sample's cached session — including its
+        # cached tool list — into another sample that happens to run on a
+        # reused task id.
+        self._task_sessions: dict[str, "MCPServerLocalSession"] = {}
 
     @override
     async def __aenter__(self) -> MCPServer:
@@ -107,17 +115,14 @@ class MCPServerLocal(MCPServer):
     async def tools(self) -> list[Tool]:
         return await self._task_session().tools()
 
-    # create a separate MCPServer session per async task / server name
-    _task_sessions: dict[str, "MCPServerLocalSession"] = {}
-
     def _task_session(self) -> "MCPServerLocalSession":
         task_id = anyio.get_current_task().id
         session_key = f"{task_id}_{self._name}"
         if session_key not in self._task_sessions:
-            MCPServerLocal._task_sessions[session_key] = MCPServerLocalSession(
+            self._task_sessions[session_key] = MCPServerLocalSession(
                 self._client, name=self._name, events=self._events
             )
-        return MCPServerLocal._task_sessions[session_key]
+        return self._task_sessions[session_key]
 
 
 class MCPServerLocalSession(MCPServer):
@@ -180,6 +185,11 @@ class MCPServerLocalSession(MCPServer):
                 finally:
                     self._session = None
                     self._exit_stack = None
+                    # Drop the cached tool list so a reused session object
+                    # (e.g., if an outer cache hands this instance to a
+                    # different sample) re-fetches tools from the server on
+                    # next __aenter__ rather than returning a stale list.
+                    self._cached_tool_list = None
 
     @override
     async def tools(self) -> list[Tool]:
@@ -198,30 +208,49 @@ class MCPServerLocalSession(MCPServer):
 
     def _tool_def_from_mcp_tool(self, mcp_tool: MCPTool) -> ToolDef:
         async def execute(**kwargs: Any) -> ToolResult:
-            async with self._client_session() as tool_session:
-                mcp_call = format_function_call(
-                    mcp_tool.name, kwargs, width=sys.maxsize
-                )
-                with trace_action(
-                    logger, "MCPServer", f"call_tool ({self._name}): {mcp_call}"
-                ):
-                    try:
-                        result = await tool_session.call_tool(mcp_tool.name, kwargs)
-                        if result.isError:
-                            raise ToolError(tool_result_as_text(result.content))
-                    except McpError as e:
-                        # Some errors that are raised via McpError (e.g. -32603)
-                        # need to be converted to ToolError so that they make it
-                        # back to the model.
-                        raise exception_for_rpc_response_error(
-                            e.error.code,
-                            e.error.message,
-                            mcp_tool.name,
-                            kwargs,
-                            error_mapper=_McpErrorMapper,
-                        ) from e
+            for _attempt in range(3):
+                try:
+                    async with self._client_session() as tool_session:
+                        mcp_call = format_function_call(
+                            mcp_tool.name, kwargs, width=sys.maxsize
+                        )
+                        with trace_action(
+                            logger, "MCPServer", f"call_tool ({self._name}): {mcp_call}"
+                        ):
+                            try:
+                                result = await tool_session.call_tool(mcp_tool.name, kwargs)
+                                if result.isError:
+                                    raise ToolError(tool_result_as_text(result.content))
+                            except McpError as e:
+                                # Some errors that are raised via McpError (e.g. -32603)
+                                # need to be converted to ToolError so that they make it
+                                # back to the model.
+                                raise exception_for_rpc_response_error(
+                                    e.error.code,
+                                    e.error.message,
+                                    mcp_tool.name,
+                                    kwargs,
+                                    error_mapper=_McpErrorMapper,
+                                ) from e
 
-                return as_inspect_content_list(result.content)  # type: ignore[return-value,arg-type]
+                        return as_inspect_content_list(result.content)  # type: ignore[return-value,arg-type]
+                except (BrokenPipeError, ConnectionError, OSError) as exc:
+                    logger.warning(
+                        f"MCP connection lost during {mcp_tool.name} "
+                        f"(attempt {_attempt + 1}/3): {exc}"
+                    )
+                    self._reset_session()
+                    if _attempt == 2:
+                        raise
+                except anyio.BrokenResourceError as exc:
+                    logger.warning(
+                        f"MCP connection lost during {mcp_tool.name} "
+                        f"(attempt {_attempt + 1}/3): {exc}"
+                    )
+                    self._reset_session()
+                    if _attempt == 2:
+                        raise
+            raise RuntimeError("unreachable")
 
         # get parameters (fill in missing ones)
         parameters = ToolParams.model_validate(mcp_tool.inputSchema)
@@ -265,6 +294,18 @@ class MCPServerLocalSession(MCPServer):
                 ):
                     await session.initialize()
                 yield session
+
+    def _reset_session(self) -> None:
+        """Clear the persistent session so the next _client_session() reconnects."""
+        if self._exit_stack is not None:
+            try:
+                import asyncio
+                asyncio.get_event_loop().create_task(self._exit_stack.aclose())
+            except Exception:
+                pass
+        self._session = None
+        self._exit_stack = None
+        self._refcount = 0
 
     def _sampling_fn(self) -> SamplingFnT | None:
         from inspect_ai.model._model import active_model
