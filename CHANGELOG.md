@@ -23,6 +23,12 @@
 - Log: `read_eval_log`, `read_eval_log_async`, and `samples_df` now accept `exclude_fields` for more memory-efficient loading of large samples.
 - Bugfix: Fix direct multi_scorer task usage.
 - Bugfix: `subprocess()` no longer deadlocks on timeout/cancel when asyncio's child watcher misses the process exit (observed under heavy `docker compose exec` load); the shielded post-kill `process.wait()` is now bounded.
+- Inspect View: Production-minified viewer bundle with vendor chunk splitting for smaller, faster-loading assets.
+- Inspect View: Faster transcript rendering for large samples via an O(n) tool-event precompute in the virtualized list.
+- Inspect View: Faster sample loading, search, and list rendering.
+- Inspect View: Lazy-load MathJax so transcripts without math skip the math engine on initial load.
+- Inspect View: Align in-transcript find ordering and match counts with how structured tool output is rendered.
+- Inspect View: Overlay client-side action annotations (click cursor, scroll arrow, typed-text badge) on the preceding browser/computer screenshot for visual tool actions.
 
 ## 0.3.240 (15 June 2026)
 
