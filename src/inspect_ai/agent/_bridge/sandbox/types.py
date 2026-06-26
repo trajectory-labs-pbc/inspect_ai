@@ -6,6 +6,7 @@ from inspect_ai.model._model import (
     Model,
     ModelEventSink,
     ModelResolver,
+    ModelResponseFilter,
 )
 from inspect_ai.tool import Tool
 from inspect_ai.tool._mcp._config import MCPServerConfigHTTP
@@ -29,6 +30,7 @@ class SandboxAgentBridge(AgentBridge):
         model_event_sink: ModelEventSink | None = None,
         forward_generation_config: bool = False,
         checkpointer: Checkpointer | None = None,
+        response_filter: ModelResponseFilter | None = None,
         model_resolver: ModelResolver | None = None,
     ) -> None:
         super().__init__(
@@ -41,6 +43,7 @@ class SandboxAgentBridge(AgentBridge):
             model_event_sink=model_event_sink,
             forward_generation_config=forward_generation_config,
             checkpointer=checkpointer,
+            response_filter=response_filter,
             model_resolver=model_resolver,
         )
         self.port = port

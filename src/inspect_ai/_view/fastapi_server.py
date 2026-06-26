@@ -568,7 +568,7 @@ def authorization_middleware(authorization: str) -> type[BaseHTTPMiddleware]:
 
 
 class _InspectStaticFiles(StaticFiles):
-    """StaticFiles with no-cache headers to avoid stale assets."""
+    """StaticFiles that caches content-hashed assets and revalidates the rest."""
 
     def file_response(
         self,
@@ -578,11 +578,14 @@ class _InspectStaticFiles(StaticFiles):
         status_code: int = 200,
     ) -> Response:
         response = super().file_response(full_path, stat_result, scope, status_code)
-        response.headers["expires"] = "Fri, 01 Jan 1990 00:00:00 GMT"
-        response.headers["pragma"] = "no-cache"
-        response.headers["cache-control"] = (
-            "no-cache, no-store, max-age=0, must-revalidate"
-        )
+        if Path(full_path).parent.name == "assets":
+            response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["expires"] = "Fri, 01 Jan 1990 00:00:00 GMT"
+            response.headers["pragma"] = "no-cache"
+            response.headers["cache-control"] = (
+                "no-cache, no-store, max-age=0, must-revalidate"
+            )
         return response
 
 

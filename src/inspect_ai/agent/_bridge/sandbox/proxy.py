@@ -1779,6 +1779,12 @@ async def model_proxy_server(
                         },
                     }
 
+                    # forward native refusal stop_details so the harness sees a
+                    # transparent refusal (Anthropic carries it on message_delta)
+                    stop_details = message.get("stop_details")
+                    if stop_details is not None:
+                        message_delta_data["delta"]["stop_details"] = stop_details
+
                     # Add optional usage fields if present
                     if "input_tokens" in usage:
                         message_delta_data["usage"]["input_tokens"] = usage[
