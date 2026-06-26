@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Agent Bridge: a bare model name arriving on a provider-specific bridge endpoint (`openai`/`google`/`anthropic`) now resolves to that provider (`resolve_inspect_model(..., provider=)`) instead of being rejected as unqualified, so bridge clients can send plain model names like `gpt-5.1`.
+
 - Task Sources: Drive a running eval from code with `TaskSource` — a seed (`initial_tasks()`) plus result-driven follow-ups (return tasks from `sample_complete`/`task_complete`, or pull the next batch from `next_tasks()`), all under one run id. Register and parameterize with `@task_source` (load by name or `file.py@name`), or add tasks imperatively from a solver/scorer/tool with `enqueue_task()`. Supported by `eval()` (not `eval_set`/`eval_retry`/`score`).
 - Checkpointing: Added support for periodically saving sample state so long-running evals can resume mid-sample after a crash. Enable with `--checkpoint` or the `checkpoint` arg to `eval()`/`eval_set()`/`eval_retry()`.
 - MCP: Fix in-sandbox stdio MCP servers hanging when the server emits unsolicited notifications (e.g. `notifications/tools/list_changed` from a server that advertises `listChanged`).
@@ -20,9 +22,16 @@
 - Inspect View: Fix log-list grid columns snapping back to default widths while data loads
 - Inspect View: Fix transcript deep links across timelines, approvals, collapsed regions, and lanes; add event label pills.
 - Inspect View:  Improve tool input density
+- Inspect View: Serve content-hashed viewer assets with long-lived immutable cache headers while `index.html` still revalidates.
 - Log: `read_eval_log`, `read_eval_log_async`, and `samples_df` now accept `exclude_fields` for more memory-efficient loading of large samples.
 - Bugfix: Fix direct multi_scorer task usage.
 - Bugfix: `subprocess()` no longer deadlocks on timeout/cancel when asyncio's child watcher misses the process exit (observed under heavy `docker compose exec` load); the shielded post-kill `process.wait()` is now bounded.
+- Inspect View: Production-minified viewer bundle with vendor chunk splitting for smaller, faster-loading assets.
+- Inspect View: Faster transcript rendering for large samples via an O(n) tool-event precompute in the virtualized list.
+- Inspect View: Faster sample loading, search, and list rendering.
+- Inspect View: Lazy-load MathJax so transcripts without math skip the math engine on initial load.
+- Inspect View: Align in-transcript find ordering and match counts with how structured tool output is rendered.
+- Inspect View: Overlay client-side action annotations (click cursor, scroll arrow, typed-text badge) on the preceding browser/computer screenshot for visual tool actions.
 
 ## 0.3.240 (15 June 2026)
 
