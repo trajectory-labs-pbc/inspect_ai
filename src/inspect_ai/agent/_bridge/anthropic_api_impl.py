@@ -13,6 +13,7 @@ from anthropic.types import (
     ImageBlockParam,
     Message,
     MessageParam,
+    RefusalStopDetails,
     SearchResultBlockParam,
     TextBlockParam,
     ToolChoiceParam,
@@ -24,6 +25,7 @@ from anthropic.types import (
 from anthropic.types import StopReason as AnthropicStopReason
 from anthropic.types.beta import (
     BetaMessage,
+    BetaRefusalStopDetails,
     BetaRequestMCPServerToolConfigurationParam,
     BetaRequestMCPServerURLDefinitionParam,
 )
@@ -163,6 +165,7 @@ async def inspect_anthropic_api_request_impl(
         model=output.model,
         role="assistant",
         stop_reason=anthropic_stop_reason(output.stop_reason),
+        stop_details=anthropic_stop_details(output.stop_reason, beta),
         type="message",
         usage=anthropic_usage(output.usage or ModelUsage()),
     )
@@ -529,6 +532,16 @@ def anthropic_stop_reason(stop_reason: StopReason) -> AnthropicStopReason:
             return "refusal"
         case "unknown":
             return "end_turn"
+
+
+def anthropic_stop_details(
+    stop_reason: StopReason, beta: bool
+) -> RefusalStopDetails | BetaRefusalStopDetails | None:
+    """Native ``stop_details`` for a refusal, mirroring the Anthropic wire format."""
+    if stop_reason == "content_filter":
+        cls = BetaRefusalStopDetails if beta else RefusalStopDetails
+        return cls(type="refusal")
+    return None
 
 
 def anthropic_usage(usage: ModelUsage) -> Usage:
