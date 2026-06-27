@@ -5,6 +5,7 @@ from inspect_ai.model._model import (
     GenerateFilter,
     Model,
     ModelEventSink,
+    ModelResolver,
     ModelResponseFilter,
 )
 from inspect_ai.tool import Tool
@@ -30,6 +31,7 @@ class SandboxAgentBridge(AgentBridge):
         forward_generation_config: bool = False,
         checkpointer: Checkpointer | None = None,
         response_filter: ModelResponseFilter | None = None,
+        model_resolver: ModelResolver | None = None,
     ) -> None:
         super().__init__(
             state,
@@ -42,6 +44,7 @@ class SandboxAgentBridge(AgentBridge):
             forward_generation_config=forward_generation_config,
             checkpointer=checkpointer,
             response_filter=response_filter,
+            model_resolver=model_resolver,
         )
         self.port = port
         self.mcp_server_configs = mcp_server_configs or []
