@@ -2466,3 +2466,86 @@ async def test_google_generate_content_streaming_web_search(
     assert "search" in collected_text.lower()
     assert function_call_name == "web_search"
     assert function_call_args["query"] == "latest AI news"
+
+
+def _bridge_error_sentinel() -> dict[str, Any]:
+    return {
+        "__inspect_bridge_error__": {
+            "status": 401,
+            "body": {
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Invalid API key or credential",
+                },
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_bridge_error_non_streaming() -> None:
+    """A surfaced provider API error becomes a real HTTP error to the harness, not a crash."""
+    import anthropic
+    from inspect_ai.agent._bridge.sandbox.proxy import model_proxy_server
+
+    async def mock_service(method: str, json_data: dict[str, Any]) -> dict[str, Any]:
+        return _bridge_error_sentinel()
+
+    server = await model_proxy_server(
+        port=0, call_bridge_model_service_async=mock_service
+    )
+    server.server = await asyncio.start_server(
+        server._handle_client, server.host, server.port
+    )
+    port = server.server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        client = AsyncAnthropic(base_url=base_url, api_key="sk-ant-test")
+        with pytest.raises(anthropic.AuthenticationError) as exc_info:
+            await client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=8,
+            )
+        assert exc_info.value.status_code == 401
+    finally:
+        if server.server:
+            server.server.close()
+            await server.server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_bridge_error_streaming() -> None:
+    """A streaming provider API error becomes an SSE error event, not a proxy crash."""
+    from inspect_ai.agent._bridge.sandbox.proxy import model_proxy_server
+
+    async def mock_service(method: str, json_data: dict[str, Any]) -> dict[str, Any]:
+        return _bridge_error_sentinel()
+
+    server = await model_proxy_server(
+        port=0, call_bridge_model_service_async=mock_service
+    )
+    server.server = await asyncio.start_server(
+        server._handle_client, server.host, server.port
+    )
+    port = server.server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        async with ClientSession() as session:
+            async with session.post(
+                f"{base_url}/v1/messages",
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 8,
+                    "stream": True,
+                },
+            ) as response:
+                text = await response.text()
+        assert "event: error" in text
+        assert "authentication_error" in text
+    finally:
+        if server.server:
+            server.server.close()
+            await server.server.wait_closed()

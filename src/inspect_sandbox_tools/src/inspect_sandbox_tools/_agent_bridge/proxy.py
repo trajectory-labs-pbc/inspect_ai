@@ -46,6 +46,37 @@ HOP_BY_HOP = {
 }
 
 
+# Contract with the host bridge service (inspect_ai agent/_bridge/sandbox/service.py):
+# a generate_* result carrying this key is a provider API error the host caught and
+# returned (instead of raising) so we can replay the real HTTP status/body to the
+# harness rather than exiting the proxy. Keep the literal in sync with service.py.
+_BRIDGE_ERROR_KEY = "__inspect_bridge_error__"
+
+
+def _bridge_error_response(completion: Any) -> dict[str, Any] | None:
+    """Proxy response that replays a provider API error to the harness.
+
+    Returns a real HTTP status/body response when *completion* is a bridge-error
+    sentinel, else None (a normal completion).
+    """
+    if isinstance(completion, dict) and _BRIDGE_ERROR_KEY in completion:
+        err = completion[_BRIDGE_ERROR_KEY]
+        return {"status": err.get("status", 502), "body": err.get("body")}
+    return None
+
+
+def _bridge_error_sse(completion: Any) -> bytes | None:
+    """SSE error event for a bridge-error sentinel (streaming paths, after headers sent)."""
+    if isinstance(completion, dict) and _BRIDGE_ERROR_KEY in completion:
+        body = completion[_BRIDGE_ERROR_KEY].get("body")
+        if not isinstance(body, dict):
+            body = {"type": "error", "error": {"type": "api_error"}}
+        return f"event: error\ndata: {json.dumps(body, ensure_ascii=False)}\n\n".encode(
+            "utf-8"
+        )
+    return None
+
+
 class AsyncHTTPServer:
     """Async HTTP server supporting GET/POST/OPTIONS with streaming + proxy utilities."""
 
@@ -555,6 +586,9 @@ async def model_proxy_server(
             completion = await call_bridge_model_service_async(
                 "generate_responses", json_data=json_body
             )
+            bridge_error = _bridge_error_response(completion)
+            if bridge_error is not None:
+                return bridge_error
 
             if stream:
 
@@ -1276,6 +1310,9 @@ async def model_proxy_server(
             completion = await call_bridge_model_service_async(
                 "generate_completions", json_data=json_body
             )
+            bridge_error = _bridge_error_response(completion)
+            if bridge_error is not None:
+                return bridge_error
 
             if stream:
 
@@ -1532,6 +1569,11 @@ async def model_proxy_server(
                                 pass
                         raise
 
+                    bridge_error = _bridge_error_sse(completion)
+                    if bridge_error is not None:
+                        yield bridge_error
+                        return
+
                     try:
                         # Parse the completion as a dict
                         message = (
@@ -1763,6 +1805,9 @@ async def model_proxy_server(
                 completion = await call_bridge_model_service_async(
                     "generate_anthropic", json_data=json_body
                 )
+                bridge_error = _bridge_error_response(completion)
+                if bridge_error is not None:
+                    return bridge_error
                 return {"status": 200, "body": completion}
         except Exception as ex:
             _handle_model_proxy_error(ex)
@@ -1797,6 +1842,9 @@ async def model_proxy_server(
             completion = await call_bridge_model_service_async(
                 "generate_google", json_data=json_body
             )
+            bridge_error = _bridge_error_response(completion)
+            if bridge_error is not None:
+                return bridge_error
 
             resp = (
                 completion if isinstance(completion, dict) else json.loads(completion)
