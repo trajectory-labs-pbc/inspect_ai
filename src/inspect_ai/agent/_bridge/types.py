@@ -19,6 +19,7 @@ from inspect_ai.model._model import (
     Model,
     ModelEventSink,
     ModelResolver,
+    ModelResponseFilter,
 )
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.tool._tool import Tool
@@ -42,6 +43,7 @@ class AgentBridge:
         forward_generation_config: bool = False,
         checkpointer: Checkpointer | None = None,
         model_resolver: ModelResolver | None = None,
+        response_filter: ModelResponseFilter | None = None,
     ) -> None:
         self._cp = checkpointer or _NoopCheckpointer()
         # AgentState is not a BaseModel so it can't be tracked directly;
@@ -82,6 +84,7 @@ class AgentBridge:
             value_type=list[ChatMessage],
         )
         self.filter = filter
+        self.response_filter = response_filter
         self.retry_refusals = retry_refusals
         self.model = model
         self.model_aliases: dict[str, str | Model] = model_aliases or {}
@@ -101,6 +104,19 @@ class AgentBridge:
     """Filter for bridge model generation.
 
     A filter may substitute for the default model generation by returning a ModelOutput or return None to allow default processing to continue.
+    """
+
+    response_filter: ModelResponseFilter | None
+    """Filter that mutates the model's output after generation.
+
+    Runs inside the refusal-retry loop, after ``model.generate()`` returns
+    and before compaction baseline is updated. Returning ``None`` passes
+    the output through unchanged; returning a ``ModelOutput`` replaces it.
+    Returning an output with ``stop_reason="content_filter"`` triggers a
+    retry (subject to ``retry_refusals``).
+
+    See ``ModelResponseFilter`` for guidance on cross-turn consistency when
+    mutating tool_use arguments.
     """
 
     model: str | None
