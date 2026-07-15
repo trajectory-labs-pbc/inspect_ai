@@ -273,6 +273,82 @@ async def test_model_proxy_request_headers_and_body(
 
 
 @pytest.mark.asyncio
+async def test_model_proxy_forwards_client_headers_to_model_service() -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_model_service(method: str, **params: Any) -> dict[str, str]:
+        calls.append((method, params))
+        return {"id": "completion"}
+
+    server = await model_proxy_server(
+        port=0,
+        call_bridge_model_service_async=call_model_service,
+    )
+    handler = server.routes["POST"]["/v1/chat/completions"]
+
+    await handler(
+        {
+            "json": {"model": "inspect", "messages": []},
+            "headers": {"x-claude-code-agent-id": "toolu_x"},
+        }
+    )
+
+    assert calls == [
+        (
+            "generate_completions",
+            {
+                "json_data": {"model": "inspect", "messages": [], "parallel_tool_calls": False},
+                "headers": {"x-claude-code-agent-id": "toolu_x"},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body", "method"),
+    [
+        (
+            "/v1/responses",
+            {"model": "inspect", "input": "hello"},
+            "generate_responses",
+        ),
+        (
+            "/v1/messages",
+            {"model": "inspect", "messages": [], "max_tokens": 1},
+            "generate_anthropic",
+        ),
+    ],
+)
+async def test_model_proxy_forwards_client_headers_for_other_generation_routes(
+    path: str,
+    body: dict[str, Any],
+    method: str,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_model_service(service_method: str, **params: Any) -> dict[str, str]:
+        calls.append((service_method, params))
+        return {"id": "completion"}
+
+    server = await model_proxy_server(
+        port=0,
+        call_bridge_model_service_async=call_model_service,
+    )
+    handler = server.routes["POST"][path]
+
+    await handler(
+        {
+            "json": body,
+            "headers": {"x-claude-code-agent-id": "toolu_x"},
+        }
+    )
+
+    assert calls[0][0] == method
+    assert calls[0][1]["headers"] == {"x-claude-code-agent-id": "toolu_x"}
+
+
+@pytest.mark.asyncio
 async def test_model_proxy_non_json_response(
     http_server: tuple[AsyncHTTPServer, str],
 ) -> None:
