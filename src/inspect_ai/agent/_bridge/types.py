@@ -14,7 +14,13 @@ from inspect_ai.model._compaction import (
 from inspect_ai.model._compaction import (
     compaction as create_compaction,
 )
-from inspect_ai.model._model import GenerateFilter, Model, ModelEventSink
+from inspect_ai.model._model import (
+    GenerateFilter,
+    Model,
+    ModelEventSink,
+    ModelResolver,
+    ModelResponseFilter,
+)
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.tool._tool import Tool
 from inspect_ai.tool._tool_info import ToolInfo
@@ -36,6 +42,8 @@ class AgentBridge:
         model_event_sink: ModelEventSink | None = None,
         forward_generation_config: bool = False,
         checkpointer: Checkpointer | None = None,
+        model_resolver: ModelResolver | None = None,
+        response_filter: ModelResponseFilter | None = None,
     ) -> None:
         self._cp = checkpointer or _NoopCheckpointer()
         # AgentState is not a BaseModel so it can't be tracked directly;
@@ -76,9 +84,11 @@ class AgentBridge:
             value_type=list[ChatMessage],
         )
         self.filter = filter
+        self.response_filter = response_filter
         self.retry_refusals = retry_refusals
         self.model = model
         self.model_aliases: dict[str, str | Model] = model_aliases or {}
+        self.model_resolver = model_resolver
         self.model_event_sink = model_event_sink
         self.forward_generation_config = forward_generation_config
         self._compaction = compaction
@@ -96,6 +106,19 @@ class AgentBridge:
     A filter may substitute for the default model generation by returning a ModelOutput or return None to allow default processing to continue.
     """
 
+    response_filter: ModelResponseFilter | None
+    """Filter that mutates the model's output after generation.
+
+    Runs inside the refusal-retry loop, after ``model.generate()`` returns
+    and before compaction baseline is updated. Returning ``None`` passes
+    the output through unchanged; returning a ``ModelOutput`` replaces it.
+    Returning an output with ``stop_reason="content_filter"`` triggers a
+    retry (subject to ``retry_refusals``).
+
+    See ``ModelResponseFilter`` for guidance on cross-turn consistency when
+    mutating tool_use arguments.
+    """
+
     model: str | None
     """Fallback model for requests that don't use ``inspect`` or ``inspect/``
     prefixed names.  ``None`` means no fallback (the request model name is
@@ -106,6 +129,13 @@ class AgentBridge:
     """Map of model name aliases.  When a request uses a name that appears
     here, the corresponding value (a ``Model`` instance or model spec string)
     is used instead.  Checked before the fallback ``model``.
+    """
+
+    model_resolver: ModelResolver | None
+    """Dynamic per-request model routing policy.  Called with the requested
+    model name after ``model_aliases`` and before the static ``model`` fallback;
+    returning a ``Model``/spec routes the request there, ``None`` defers to the
+    fallback.  Lets a bridge route by policy without enumerating every name.
     """
 
     model_event_sink: ModelEventSink | None
