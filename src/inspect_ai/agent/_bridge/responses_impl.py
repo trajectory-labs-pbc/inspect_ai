@@ -101,6 +101,7 @@ from inspect_ai.model._openai_responses import (
     assistant_internal,
     code_interpreter_to_tool_use,
     content_from_response_input_content_param,
+    is_additional_tools,
     is_assistant_message_param,
     is_code_interpreter_tool_param,
     is_computer_call_output,
@@ -961,6 +962,20 @@ def messages_from_responses_input(
                     tool_call_id=item.get("call_id"),
                     function=TOOL_SEARCH_NAME,
                     content=to_json_str_safe(item.get("tools", [])),
+                )
+            )
+        elif is_additional_tools(item):
+            # developer-declared tool availability (e.g. codex CLI re-declaring
+            # MCP-discovered tools mid-conversation for newer OpenAI models, see
+            # https://github.com/UKGovernmentBEIS/inspect_ai/issues/4490). The
+            # bridge's own generate() call already receives the full bridged
+            # tool list up front (independent of this item), so this carries no
+            # new information for message-history reconstruction; surface it as
+            # a system message so it stays visible in transcripts rather than
+            # being silently dropped or crashing the bridge.
+            messages.append(
+                ChatMessageSystem(
+                    content=f"[additional tools declared] {to_json_str_safe(item.get('tools', []))}"
                 )
             )
         else:

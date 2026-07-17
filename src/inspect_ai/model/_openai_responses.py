@@ -78,6 +78,7 @@ from openai.types.responses.response_input_image_content_param import (
     ResponseInputImageContentParam,
 )
 from openai.types.responses.response_input_item_param import (
+    AdditionalTools,
     ComputerCallOutput,
     FunctionCallOutput,
     Message,
@@ -2071,6 +2072,14 @@ def is_tool_search_output(
     # tolerate items without a "type" key (e.g. simple user messages) since this
     # is scanned over raw input items, some of which omit "type"
     return param.get("type") == "tool_search_output"
+
+
+def is_additional_tools(
+    param: ResponseInputItemParam,
+) -> TypeGuard[AdditionalTools]:
+    # tolerate items without a "type" key (e.g. simple user messages) since this
+    # is scanned over raw input items, some of which omit "type"
+    return param.get("type") == "additional_tools"
 
 
 def is_function_tool_param(tool_param: ToolParam) -> TypeGuard[FunctionToolParam]:
