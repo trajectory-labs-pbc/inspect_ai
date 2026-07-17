@@ -1479,6 +1479,36 @@ def test_fastapi_authorization_middleware() -> None:
         )
 
 
+def test_static_assets_immutable_cache_for_assets_dir_only(tmp_path: Path) -> None:
+    from fastapi import FastAPI
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "index-Brs8pQ1a.js").write_text("// content-hashed entry bundle\n")
+    (tmp_path / "index.html").write_text("<!doctype html><title>v</title>\n")
+
+    app = FastAPI()
+    app.mount(
+        "/",
+        fastapi_server._InspectStaticFiles(directory=tmp_path.as_posix(), html=True),
+        name="static",
+    )
+
+    with fastapi.testclient.TestClient(app) as client:
+        asset = client.request("GET", "/assets/index-Brs8pQ1a.js")
+        asset.raise_for_status()
+        assert asset.headers["cache-control"] == ("public, max-age=31536000, immutable")
+        assert "pragma" not in asset.headers
+        assert "expires" not in asset.headers
+
+        index = client.request("GET", "/")
+        index.raise_for_status()
+        assert index.headers["cache-control"] == (
+            "no-cache, no-store, max-age=0, must-revalidate"
+        )
+        assert index.headers["pragma"] == "no-cache"
+
+
 def test_fastapi_nan_metric(test_client: TestClient) -> None:
     file_path = "nan_test/2025-01-01T00-00-00+00-00_nantest_nanid.eval"
     full_path = f"memory://{file_path}"
