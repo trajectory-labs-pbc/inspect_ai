@@ -28,6 +28,7 @@
 - Inspect View: Timeline now requires a tool-calling loop for utility-agent classification and surfaces the hidden event count. (#425)
 - Inspect View: Added connection limit history display to the Stats tab. (#447)
 - Inspect View: Fixed viewer to show the Action tab first for annotated browser actions. (#429)
+- Agent Bridge: A bridged client that sends the eval model's concrete id instead of `inspect` (claude_code sends e.g. `claude-fable-5`) now resolves to the eval's own `Model` instance rather than a second one built by `get_model()`, whose memoization key includes the config. Previously such a client got a distinct instance, and since the eval's `GenerateConfig` is only applied to the active model, eval-level options such as `fallback_models` were silently dropped before the provider request. Aliases, model roles, and any other model the client names are unaffected.
 
 ## 0.3.249 (20 July 2026)
 
