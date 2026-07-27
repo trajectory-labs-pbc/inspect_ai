@@ -83,7 +83,8 @@ class AgentBridge:
         self.forward_generation_config = forward_generation_config
         self._compaction = compaction
         self._compact: Compact | None = None
-        self._last_message_count = 0
+        self._last_message_counts: dict[str | None, int] = {}
+        self._primary_model: str | None = None
         self._pending_operator = 0
         self._operator_keys: set[str] = set()
 
@@ -198,21 +199,35 @@ class AgentBridge:
 
     _message_ids: dict[str, list[str]]
 
-    async def _track_state(self, input: list[ChatMessage], output: ModelOutput) -> None:
-        # automatically track agent state based on observing generations made through
-        # the bridge. we need to distinguish between the "main" thread of generation
-        # and various types of side / sub-agent calls to the model (e.g. claude code
-        # does bash path detection using a side call). our heuristic is to keep the
-        # number of messages that were in the _last_ generation, and to update the
-        # state whenever the total messages exceeds it. this should pick up normal
-        # agent loops that keep appending, while at the same time discarding side model
-        # calls that tend to be shorter. finally, this should handle recovering from
-        # history compaction, which will shorten the message history considerably
+    async def _track_state(
+        self,
+        input: list[ChatMessage],
+        output: ModelOutput,
+        model: str | None = None,
+    ) -> None:
+        # Track agent state from the primary bridge model only. Callers pass the
+        # resolved fully-qualified ``str(ModelName(model))``, which distinguishes a
+        # transparent proxy's codex-auto-review reviewer from its agent model.
+        #
+        # The first identified model is the primary because it must generate before a
+        # reviewer has anything to review. Model identity rejects side calls exactly;
+        # a reviewer may maintain a longer conversation, so a length-only heuristic is
+        # insufficient. Within the primary model, retain the existing comparison with
+        # its previous generation (not a high-water mark): after history compaction,
+        # a shorter conversation can still be adopted once it grows past that count.
+        # Calls without an identifier share the ``None`` entry, preserving the legacy
+        # single-counter behavior for external callers.
         messages = input + [output.message]
-        if len(messages) > self._last_message_count:
+        last_message_count = self._last_message_counts.get(model, 0)
+        if model is not None and self._primary_model is None:
+            self._primary_model = model
+
+        if (model is None or model == self._primary_model) and (
+            len(messages) > last_message_count
+        ):
             self.state.messages = messages
             self.state.output = output
-        self._last_message_count = len(messages)
+        self._last_message_counts[model] = len(messages)
 
         # tick the checkpointer
         await self._cp.tick()
