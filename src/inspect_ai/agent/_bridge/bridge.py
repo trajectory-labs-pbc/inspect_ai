@@ -15,7 +15,12 @@ from inspect_ai.agent._agent import Agent, AgentState, agent
 from inspect_ai.agent._bridge.types import AgentBridge
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model._compaction.types import CompactionStrategy
-from inspect_ai.model._model import GenerateFilter, ModelEventSink, get_model
+from inspect_ai.model._model import (
+    GenerateFilter,
+    ModelEventSink,
+    ModelResponseFilter,
+    get_model,
+)
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.model._openai_convert import (
     messages_from_openai,
@@ -93,6 +98,7 @@ async def agent_bridge(
     code_execution: CodeExecutionProviders | None = None,
     model_event_sink: ModelEventSink | None = None,
     forward_generation_config: bool = False,
+    response_filter: ModelResponseFilter | None = None,
 ) -> AsyncGenerator[AgentBridge, None]:
     """Agent bridge.
 
@@ -135,6 +141,10 @@ async def agent_bridge(
           parameters like the system prompt, tools, and response format are always
           forwarded). Set `True` for faithful-proxy behavior where the client's
           generation parameters are authoritative.
+       response_filter: Filter that mutates model output after generation.
+          Called inside the refusal-retry loop, between ``model.generate()``
+          and the compaction baseline update. Return ``None`` to pass
+          through; return a ``ModelOutput`` to replace the response.
     """
     # ensure one time init
     init_bridge_request_patch()
@@ -154,6 +164,7 @@ async def agent_bridge(
         compaction,
         model_event_sink=model_event_sink,
         forward_generation_config=forward_generation_config,
+        response_filter=response_filter,
     )
 
     # set the patch config for this context and child coroutines
@@ -479,9 +490,6 @@ def init_google_request_patch() -> None:
         if config.enabled and ":generateContent" in path:
             model_name = _google_api_model_name(path)
             if model_name and targets_inspect_model({"model": model_name}):
-                if ":streamGenerateContent" in path:
-                    raise_stream_error()
-
                 response = await inspect_google_api_request(
                     cast(dict[str, Any], request_dict),
                     config.web_search,
@@ -499,6 +507,36 @@ def init_google_request_patch() -> None:
         return result
 
     setattr(BaseApiClient, "async_request", patched_async_request)
+
+    # streaming requests use a separate entry point (`async_request_streamed`),
+    # so patch it as well to reject streaming for inspect models (parity with
+    # the OpenAI/Anthropic patches, which see streaming on the same method as
+    # non-streaming via their `stream` argument)
+    original_async_request_streamed = getattr(BaseApiClient, "async_request_streamed")
+    if original_async_request_streamed is None:
+        raise RuntimeError(
+            "Couldn't find 'async_request_streamed' method on BaseApiClient"
+        )
+
+    @wraps(original_async_request_streamed)
+    async def patched_async_request_streamed(
+        self: BaseApiClient,
+        http_method: str,
+        path: str,
+        request_dict: dict[str, object],
+        http_options: Any = None,
+    ) -> Any:
+        config = _patch_config.get()
+        if config.enabled and ":streamGenerateContent" in path:
+            model_name = _google_api_model_name(path)
+            if model_name and targets_inspect_model({"model": model_name}):
+                raise_stream_error()
+
+        return await original_async_request_streamed(
+            self, http_method, path, request_dict, http_options
+        )
+
+    setattr(BaseApiClient, "async_request_streamed", patched_async_request_streamed)
 
 
 def _google_api_model_name(path: str) -> str | None:
