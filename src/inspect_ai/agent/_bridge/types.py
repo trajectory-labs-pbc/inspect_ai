@@ -14,7 +14,13 @@ from inspect_ai.model._compaction import (
 from inspect_ai.model._compaction import (
     compaction as create_compaction,
 )
-from inspect_ai.model._model import GenerateFilter, Model, ModelEventSink
+from inspect_ai.model._model import (
+    GenerateFilter,
+    Model,
+    ModelEventSink,
+    ModelResolver,
+    ModelResponseFilter,
+)
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.tool._tool import Tool
 from inspect_ai.tool._tool_info import ToolInfo
@@ -36,6 +42,8 @@ class AgentBridge:
         model_event_sink: ModelEventSink | None = None,
         forward_generation_config: bool = False,
         checkpointer: Checkpointer | None = None,
+        response_filter: ModelResponseFilter | None = None,
+        model_resolver: ModelResolver | None = None,
     ) -> None:
         self._cp = checkpointer or _NoopCheckpointer()
         # AgentState is not a BaseModel so it can't be tracked directly;
@@ -76,14 +84,17 @@ class AgentBridge:
             value_type=list[ChatMessage],
         )
         self.filter = filter
+        self.response_filter = response_filter
         self.retry_refusals = retry_refusals
         self.model = model
         self.model_aliases: dict[str, str | Model] = model_aliases or {}
+        self.model_resolver = model_resolver
         self.model_event_sink = model_event_sink
         self.forward_generation_config = forward_generation_config
         self._compaction = compaction
         self._compact: Compact | None = None
-        self._last_message_count = 0
+        self._last_message_counts: dict[str | None, int] = {}
+        self._primary_model: str | None = None
         self._pending_operator = 0
         self._operator_keys: set[str] = set()
 
@@ -96,6 +107,19 @@ class AgentBridge:
     A filter may substitute for the default model generation by returning a ModelOutput or return None to allow default processing to continue.
     """
 
+    response_filter: ModelResponseFilter | None
+    """Filter that mutates the model's output after generation.
+
+    Runs inside the refusal-retry loop, after ``model.generate()`` returns
+    and before compaction baseline is updated. Returning ``None`` passes
+    the output through unchanged; returning a ``ModelOutput`` replaces it.
+    Returning an output with ``stop_reason="content_filter"`` triggers a
+    retry (subject to ``retry_refusals``).
+
+    See ``ModelResponseFilter`` for guidance on cross-turn consistency when
+    mutating tool_use arguments.
+    """
+
     model: str | None
     """Fallback model for requests that don't use ``inspect`` or ``inspect/``
     prefixed names.  ``None`` means no fallback (the request model name is
@@ -106,6 +130,13 @@ class AgentBridge:
     """Map of model name aliases.  When a request uses a name that appears
     here, the corresponding value (a ``Model`` instance or model spec string)
     is used instead.  Checked before the fallback ``model``.
+    """
+
+    model_resolver: ModelResolver | None
+    """Dynamic per-request model routing policy.  Called with the requested
+    model name after ``model_aliases`` and before the static ``model`` fallback;
+    returning a ``Model``/spec routes the request there, ``None`` defers to the
+    fallback.  Lets a bridge route by policy without enumerating every name.
     """
 
     model_event_sink: ModelEventSink | None
@@ -198,21 +229,49 @@ class AgentBridge:
 
     _message_ids: dict[str, list[str]]
 
-    async def _track_state(self, input: list[ChatMessage], output: ModelOutput) -> None:
+    async def _track_state(
+        self,
+        input: list[ChatMessage],
+        output: ModelOutput,
+        model: str | None = None,
+    ) -> None:
         # automatically track agent state based on observing generations made through
         # the bridge. we need to distinguish between the "main" thread of generation
         # and various types of side / sub-agent calls to the model (e.g. claude code
-        # does bash path detection using a side call). our heuristic is to keep the
-        # number of messages that were in the _last_ generation, and to update the
-        # state whenever the total messages exceeds it. this should pick up normal
-        # agent loops that keep appending, while at the same time discarding side model
-        # calls that tend to be shorter. finally, this should handle recovering from
-        # history compaction, which will shorten the message history considerably
+        # does bash path detection using a side call).
+        #
+        # this was previously a length heuristic alone -- keep the number of messages in
+        # the _last_ generation and update state whenever the total exceeds it, on the
+        # assumption that side model calls "tend to be shorter". that assumption fails
+        # for a side model holding a PERSISTENT conversation: codex CLI in auto-mode runs
+        # its codex-auto-review reviewer through this same bridge, and that reviewer
+        # accumulates one user turn plus one assistant verdict per reviewed action. since
+        # the counter held the previous generation's length and was shared across models,
+        # a reviewer conversation only had to beat another reviewer call to win, and
+        # state.messages was then REPLACED wholesale by the reviewer's transcript --
+        # discarding the agent's conversation, tool calls and all. consumers of
+        # state.messages (scoring above all) silently read the wrong conversation.
+        #
+        # so: count per model, and let only the primary model assign state. the primary
+        # is the first model seen generating here, which is sound because a reviewer
+        # cannot run before there is an action to review.
+        #
+        # NOTE: within the primary model the comparison is still against that model's own
+        # PREVIOUS generation, deliberately not a high-water mark. history compaction
+        # shortens the conversation considerably, and the unconditional counter update
+        # below is what lets the compacted conversation be adopted on the next turn.
+        # a high-water mark would silently break compaction recovery.
         messages = input + [output.message]
-        if len(messages) > self._last_message_count:
+        last_message_count = self._last_message_counts.get(model, 0)
+        if model is not None and self._primary_model is None:
+            self._primary_model = model
+
+        if (model is None or model == self._primary_model) and (
+            len(messages) > last_message_count
+        ):
             self.state.messages = messages
             self.state.output = output
-        self._last_message_count = len(messages)
+        self._last_message_counts[model] = len(messages)
 
         # tick the checkpointer
         await self._cp.tick()

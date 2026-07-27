@@ -32,6 +32,7 @@ from anthropic.lib.streaming import AsyncMessageStream
 from anthropic.types import (
     Base64PDFSourceParam,
     CacheControlEphemeralParam,
+    CitationsConfigParam,
     CodeExecutionToolResultBlock,
     CodeExecutionToolResultBlockParam,
     ContentBlock,
@@ -57,6 +58,7 @@ from anthropic.types import (
     ToolChoiceParam,
     ToolChoiceToolParam,
     ToolParam,
+    ToolReferenceBlockParam,
     ToolResultBlockParam,
     ToolTextEditor20250124Param,
     ToolUseBlock,
@@ -634,6 +636,7 @@ class AnthropicAPI(ModelAPI):
         # turn can become the "latest" one and trip those checks — neutralize
         # thinking to plain text before counting (see the helper's docstring).
         messages = neutralize_thinking_for_token_counting(messages)
+        normalize_document_citations(messages)
 
         # Beta opt-ins required for special content in the history. The API
         # validates content block types for token counting too, so replayed
@@ -992,6 +995,24 @@ class AnthropicAPI(ModelAPI):
             # pass through context_management for compaction
             if CONTEXT_MANAGEMENT in config.extra_body:
                 extra_body[CONTEXT_MANAGEMENT] = config.extra_body[CONTEXT_MANAGEMENT]
+            # Pass through a caller-supplied `fallbacks` directive verbatim (the
+            # agent bridge forwards Claude Code's own server-side fallback
+            # request this way). `config.fallback_models` above already wrote
+            # this key, so an explicit Inspect-level setting wins; otherwise the
+            # client's directive is honoured untouched. The beta is appended here
+            # rather than relying on the caller's `anthropic-beta` header, so the
+            # directive cannot be silently ignored by the API. Skipped on
+            # bedrock/vertex/azure, which do not accept the field at all (the same
+            # endpoints `fallback_models` warns about above) -- forwarding it
+            # there would fail the request rather than degrade gracefully.
+            if (
+                FALLBACKS_FIELD in config.extra_body
+                and FALLBACKS_FIELD not in extra_body
+                and not (self.is_bedrock() or self.is_vertex() or self.is_azure())
+            ):
+                extra_body[FALLBACKS_FIELD] = config.extra_body[FALLBACKS_FIELD]
+                if FALLBACK_BETA not in betas:
+                    betas.append(FALLBACK_BETA)
 
         # return config
         return params, extra_body, headers, betas
@@ -1481,6 +1502,8 @@ class AnthropicAPI(ModelAPI):
             # rejects cache_control on those.
             if message_params:
                 add_lookback_cache_control(message_params, self.cache_ttl)
+
+        normalize_document_citations(message_params)
 
         # return chat input
         return (
@@ -2394,6 +2417,55 @@ async def message_param(message: ChatMessage) -> MessageParam:
                 for item in await message_block_params(content)
             ],
         )
+
+
+def normalize_document_citations(messages: list[MessageParam]) -> None:
+    documents = _citation_document_blocks(messages)
+    if any("citations" in document for document in documents):
+        for document in documents:
+            document["citations"] = CitationsConfigParam(enabled=True)
+
+
+def _citation_document_blocks(messages: list[MessageParam]) -> list[DocumentBlockParam]:
+    documents: list[DocumentBlockParam] = []
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, str):
+            continue
+        for block in content:
+            if _is_citation_document_block(block):
+                documents.append(block)
+            elif _is_tool_result_block(block):
+                tool_result_content = block.get("content")
+                if tool_result_content is None or isinstance(tool_result_content, str):
+                    continue
+                documents.extend(
+                    content_block
+                    for content_block in tool_result_content
+                    if _is_citation_document_block(content_block)
+                )
+    return documents
+
+
+CitationCandidateBlock = ContentBlock | ContentBlockParam | ToolReferenceBlockParam
+
+
+def _is_citation_document_block(
+    block: CitationCandidateBlock,
+) -> TypeGuard[DocumentBlockParam]:
+    return _is_document_block(block) and block["source"]["type"] != "content"
+
+
+def _is_document_block(
+    block: CitationCandidateBlock,
+) -> TypeGuard[DocumentBlockParam]:
+    return isinstance(block, dict) and block.get("type") == "document"
+
+
+def _is_tool_result_block(
+    block: CitationCandidateBlock,
+) -> TypeGuard[ToolResultBlockParam]:
+    return isinstance(block, dict) and block.get("type") == "tool_result"
 
 
 MessageBlock = Union[
@@ -3528,6 +3600,9 @@ EXTRA_BODY = "extra_body"
 CONTEXT_MANAGEMENT = "context_management"
 MIN_COMPACTION_TOKENS = 50000  # Anthropic API minimum trigger value
 FALLBACK_BETA = "server-side-fallback-2026-06-01"
+# Request-body field carrying a server-side refusal fallback directive. Routed
+# via extra_body because the SDK only exposes it on client.beta.messages.create.
+FALLBACKS_FIELD = "fallbacks"
 
 
 def _add_edit_compaction(
@@ -4068,9 +4143,12 @@ async def message_block_params(
             source = PlainTextSourceParam(
                 type="text", media_type="text/plain", data=file_bytes.decode()
             )
-        return [
-            DocumentBlockParam(type="document", source=source, title=content.filename)
-        ]
+        document_block = DocumentBlockParam(
+            type="document", source=source, title=content.filename
+        )
+        if content.citations and not is_image_type(content.mime_type):
+            document_block["citations"] = CitationsConfigParam(enabled=True)
+        return [document_block]
 
     elif isinstance(content, ContentData):
         compaction_param = _compaction_from_content_data(content)
