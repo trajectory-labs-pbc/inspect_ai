@@ -480,6 +480,7 @@ def _check_main_divergence(url: str) -> Literal["clean", "edited"]:
         # the CI injectable_src filter (see docstring).
         pathspecs_to_check = [
             ["src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_version.txt"],
+            ["src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_fork_revision.txt"],
             [
                 "src/inspect_sandbox_tools",
                 ":(exclude)src/inspect_sandbox_tools/tests",

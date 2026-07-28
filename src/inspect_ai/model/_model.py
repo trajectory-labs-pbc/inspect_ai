@@ -1680,6 +1680,22 @@ or return ``None`` to allow default processing to continue.
 """
 
 
+ModelResolver: TypeAlias = Callable[[str], "Model | str | None"]
+
+
+ModelResponseFilter: TypeAlias = Callable[
+    [
+        Model,
+        ModelOutput,
+        list[ChatMessage],
+        list[ToolInfo],
+        ToolChoice | None,
+        GenerateConfig,
+    ],
+    Awaitable[ModelOutput | None],
+]
+
+
 class AttemptTimeoutError(RuntimeError):
     def __init__(self, timeout: int | None) -> None:
         super().__init__(f"attempt_timeout '{timeout or 0}' exceeded.")
