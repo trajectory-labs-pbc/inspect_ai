@@ -1,4 +1,5 @@
 import gzip
+import json
 import os
 import subprocess
 import sys
@@ -7,10 +8,11 @@ from contextlib import asynccontextmanager
 from importlib import resources
 from logging import getLogger
 from pathlib import Path
-from typing import AsyncIterator, BinaryIO, Literal, get_args
+from typing import AsyncIterator, BinaryIO, Final, Literal, get_args
 from urllib.parse import unquote, urlparse
 
 import httpx
+import semver
 from rich.prompt import Prompt
 
 import inspect_ai
@@ -34,7 +36,12 @@ from ._build_config import (
     config_to_filename,
 )
 
-_BUCKET_BASE_URL = "https://inspect-sandbox-tools.s3.us-east-2.amazonaws.com"
+_DEFAULT_BUCKET_BASE_URL: Final = "https://TODO-fork-sandbox-tools-bucket.invalid"
+"""TODO: Replace after the Pulumi bucket lane publishes the production URL."""
+
+_BUCKET_BASE_URL = os.environ.get(
+    "INSPECT_SANDBOX_TOOLS_BASE_URL", _DEFAULT_BUCKET_BASE_URL
+)
 
 logger = getLogger(__name__)
 
@@ -137,6 +144,28 @@ async def _inject_container_tools_code(sandbox: SandboxEnvironment) -> None:
         )
         if not result.success:
             raise RuntimeError(f"Failed to start sandbox tools server: {result.stderr}")
+
+        version_result = await sandbox.exec(
+            [SANDBOX_CLI, "exec"],
+            input='{"jsonrpc":"2.0","method":"version","id":1}',
+            user=sandbox._tools_user,
+        )
+        if not version_result.success:
+            raise RuntimeError(
+                f"Failed to query sandbox tools version: {version_result.stderr}"
+            )
+        version_response = json.loads(version_result.stdout)
+        if not isinstance(version_response, dict) or not isinstance(
+            version_response.get("result"), str
+        ):
+            raise RuntimeError("Sandbox tools version response is invalid")
+        binary_version = semver.Version.parse(version_response["result"])
+        expected_build = f"tl.{_get_sandbox_tools_fork_revision()}"
+        if binary_version.build != expected_build:
+            raise RuntimeError(
+                "Sandbox tools fork revision mismatch: "
+                f"expected {expected_build}, got {binary_version.build!r}"
+            )
     except Exception as e:
         raise SandboxInjectionError(
             f"Failed to inject sandbox tools into sandbox: {e}", cause=e
@@ -318,11 +347,19 @@ def _get_sandbox_tools_version() -> str:
     return version_file.read_text().strip()
 
 
+def _get_sandbox_tools_fork_revision() -> int:
+    # Bump for executable-source changes, excluding tests/, design/, and Markdown;
+    # reset to 1 when sandbox_tools_version.txt advances with an upstream version bump.
+    revision_file = Path(__file__).parent / "sandbox_tools_fork_revision.txt"
+    return int(revision_file.read_text().strip())
+
+
 def _get_executable_name(arch: Architecture, dev: bool, musl: bool) -> str:
     return config_to_filename(
         SandboxToolsBuildConfig(
             arch=arch,
             version=int(_get_sandbox_tools_version()),
+            fork_rev=_get_sandbox_tools_fork_revision(),
             suffix="dev" if dev else None,
             musl=musl,
         )
@@ -431,14 +468,6 @@ def _get_install_state() -> InstallState:
 def _check_main_divergence(url: str) -> Literal["clean", "edited"]:
     """Check if there are changes to sandbox tools files relative to main.
 
-    Only changes that ship in the built binary count: docs (`*.md`,
-    `design/`) and `tests/` under the injectable tree are excluded, mirroring
-    the CI `injectable_src` paths-filter (`.github/workflows/build.yml`,
-    `detect-slow` job) — keep the two in sync. CI skips the `-dev` build for
-    such changes, so classifying them "edited" would resolve a `-dev` binary
-    that never gets built (and prompt local developers to build one for a
-    doc-only edit).
-
     Returns:
         Literal["clean", "edited"]: The state of changes to sandbox tools files.
             - "clean": No changes to sandbox tools files relative to main branch,
@@ -480,6 +509,9 @@ def _check_main_divergence(url: str) -> Literal["clean", "edited"]:
         # the CI injectable_src filter (see docstring).
         pathspecs_to_check = [
             ["src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_version.txt"],
+            [
+                "src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_fork_revision.txt"
+            ],
             [
                 "src/inspect_sandbox_tools",
                 ":(exclude)src/inspect_sandbox_tools/tests",

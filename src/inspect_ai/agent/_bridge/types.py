@@ -15,7 +15,13 @@ from inspect_ai.model._compaction import (
 from inspect_ai.model._compaction import (
     compaction as create_compaction,
 )
-from inspect_ai.model._model import GenerateFilter, Model, ModelEventSink
+from inspect_ai.model._model import (
+    GenerateFilter,
+    Model,
+    ModelEventSink,
+    ModelResolver,
+    ModelResponseFilter,
+)
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.tool._tool import Tool
 from inspect_ai.tool._tool_info import ToolInfo
@@ -37,6 +43,8 @@ class AgentBridge:
         model_event_sink: ModelEventSink | None = None,
         forward_generation_config: bool = False,
         checkpointer: Checkpointer | None = None,
+        model_resolver: ModelResolver | None = None,
+        response_filter: ModelResponseFilter | None = None,
     ) -> None:
         self._cp = checkpointer or _NoopCheckpointer()
         # AgentState is not a BaseModel so it can't be tracked directly;
@@ -77,14 +85,17 @@ class AgentBridge:
             value_type=list[ChatMessage],
         )
         self.filter = filter
+        self.response_filter = response_filter
         self.retry_refusals = retry_refusals
         self.model = model
         self.model_aliases: dict[str, str | Model] = model_aliases or {}
+        self.model_resolver = model_resolver
         self.model_event_sink = model_event_sink
         self.forward_generation_config = forward_generation_config
         self._compaction = compaction
         self._compact: Compact | None = None
-        self._last_message_count = 0
+        self._last_message_counts: dict[str | None, int] = {}
+        self._primary_model: str | None = None
         # thread-tracking state for _track_state (see its docstring). the
         # descent anchor is the initial input (via _compaction_prefix, which
         # restores to the original input on checkpoint resume).
@@ -112,6 +123,8 @@ class AgentBridge:
     A filter may substitute for the default model generation by returning a ModelOutput or return None to allow default processing to continue.
     """
 
+    response_filter: ModelResponseFilter | None
+
     model: str | None
     """Fallback model for requests that don't use ``inspect`` or ``inspect/``
     prefixed names.  ``None`` means no fallback (the request model name is
@@ -123,6 +136,8 @@ class AgentBridge:
     here, the corresponding value (a ``Model`` instance or model spec string)
     is used instead.  Checked before the fallback ``model``.
     """
+
+    model_resolver: ModelResolver | None
 
     model_event_sink: ModelEventSink | None
     """Optional sink that takes ownership of `ModelEvent` emission for calls
@@ -214,7 +229,12 @@ class AgentBridge:
 
     _message_ids: dict[str, list[str]]
 
-    async def _track_state(self, input: list[ChatMessage], output: ModelOutput) -> None:
+    async def _track_state(
+        self,
+        input: list[ChatMessage],
+        output: ModelOutput,
+        model: str | None = None,
+    ) -> None:
         """Track agent state by observing generations made through the bridge.
 
         We need to distinguish the "main" thread of generation from side /
@@ -256,6 +276,13 @@ class AgentBridge:
           displacement above when it makes only one.
         """
         messages = input + [output.message]
+        last_message_count = self._last_message_counts.get(model, 0)
+        if model is not None and self._primary_model is None:
+            self._primary_model = model
+        if model is not None and model != self._primary_model:
+            self._last_message_counts[model] = len(messages)
+            await self._cp.tick()
+            return
         fps = [_message_fingerprint(m) for m in messages]
 
         if self._tracked_fps is None:
@@ -285,7 +312,7 @@ class AgentBridge:
                 # (flapping guard).
                 self._adopt_thread(messages, output, fps, calls=1)
             elif descends == self._tracked_descends and len(messages) > (
-                len(self._tracked_fps) if descends is True else self._last_message_count
+                len(self._tracked_fps) if descends is True else last_message_count
             ):
                 # legacy length heuristic. when both threads descend, compare
                 # against the tracked thread so a parked side call can't lower
@@ -298,7 +325,7 @@ class AgentBridge:
             else:
                 self._candidate_fps = fps
 
-        self._last_message_count = len(messages)
+        self._last_message_counts[model] = len(messages)
 
         # tick the checkpointer
         await self._cp.tick()
