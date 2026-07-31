@@ -1,6 +1,5 @@
 ## Unreleased
 
-- Human Agent: `human_cli()` now accepts a `customize_commands` transform, letting callers tailor the human-agent CLI's command list (swap, restrict, or append `HumanAgentCommand`s) without patching inspect.
 - Sandbox: Large sandbox-tool responses are transferred intact instead of corrupting JSON-RPC frames when they exceed the sandbox exec output limit.
 - Agent Bridge: Fix for `message_limit`/`token_limit`/`cost_limit` errors not being properly raised when running in a sandbox.
 - Bugfix: Reading eval logs with field exclusion (e.g. header-only reads) no longer crashes under a trio event loop; the pure-Python ijson backend is now selected when the C backend's asyncio-only async parser is unavailable. (#4589)
@@ -44,6 +43,7 @@
 - Bugfix: `text_editor()` paths containing a null byte now return a tool error to the model instead of crashing the tool. (#4659)
 - Bugfix: Anthropic: `count_tokens()` now sends `extra_headers` from the generate config (including any `anthropic-beta` values), matching `generate()`. (#4606)
 - Bugfix: Compaction: Fix `CompactionEdit` clearing server-side tool uses at stale message indices when `keep_tool_inputs=False` removes client-side tool messages, which raised `IndexError` or wrote a tool use into an unrelated message. (#4528)
+- Human Agent: `human_cli()` now accepts a `customize_commands` option for tailoring the commands available in the human agent CLI.
 
 ## 0.3.251 (29 July 2026)
 
