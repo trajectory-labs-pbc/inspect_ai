@@ -2,20 +2,18 @@ import contextlib
 import os
 import sys
 from contextlib import AsyncExitStack
-from datetime import timedelta
 from logging import getLogger
 from pathlib import Path
 from types import TracebackType
 from typing import Any, AsyncIterator, Callable
 
 import anyio
-from mcp import McpError
 from mcp.client.session import ClientSession, SamplingFnT
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import (
     AudioContent,
+    CallToolResult,
     EmbeddedResource,
     ImageContent,
     ResourceLink,
@@ -37,16 +35,20 @@ from inspect_ai.tool._tool_def import ToolDef
 from inspect_ai.tool._tool_params import ToolParams
 from inspect_ai.util._anyio import inner_exception
 
+from ._compat import (
+    MCP_READ_TIMEOUT_CODES,
+    McpError,
+    read_timeout_arg,
+    result_is_error,
+    streamablehttp_client,
+    tool_input_schema,
+)
 from ._context import MCPServerContext
 from ._sandbox import DEFAULT_SANDBOX_TIMEOUT, sandbox_client
 from ._types import MCPServer
 from .sampling import as_inspect_content_list, sampling_fn
 
 logger = getLogger(__name__)
-
-# `mcp.ClientSession` raises an McpError with this code (httpx.codes.REQUEST_TIMEOUT)
-# when a `read_timeout_seconds` deadline expires while awaiting a tool response.
-_MCP_READ_TIMEOUT_CODE = 408
 
 
 class _McpErrorMapper(JSONRPCErrorMapper):
@@ -122,14 +124,28 @@ class MCPServerLocal(MCPServer):
     def _task_session(self) -> "MCPServerLocalSession":
         task_id = anyio.get_current_task().id
         session_key = f"{task_id}_{self._name}"
-        if session_key not in self._task_sessions:
-            MCPServerLocal._task_sessions[session_key] = MCPServerLocalSession(
+        session = MCPServerLocal._task_sessions.get(session_key)
+        if session is None:
+            session = MCPServerLocalSession(
                 self._client,
                 name=self._name,
                 events=self._events,
                 timeout=self._timeout,
+                cache_key=session_key,
+                task_sessions=MCPServerLocal._task_sessions,
             )
-        return MCPServerLocal._task_sessions[session_key]
+            MCPServerLocal._task_sessions[session_key] = session
+        return session
+
+    def _tool_cache_scope(self) -> object:
+        # Cache token for MCPToolSourceLocal: the per-task session OBJECT.
+        # anyio's TaskInfo.id is id()-based on asyncio and can be reused once
+        # an earlier task is garbage collected, so a raw task id is not unique
+        # over time. Sessions evict themselves from _task_sessions when they
+        # close, so a reused task id yields a fresh session object and the
+        # tool source re-resolves rather than serving tools bound to a dead
+        # session.
+        return self._task_session()
 
 
 class MCPServerLocalSession(MCPServer):
@@ -140,6 +156,8 @@ class MCPServerLocalSession(MCPServer):
         name: str,
         events: bool,
         timeout: int | None = None,
+        cache_key: str | None = None,
+        task_sessions: dict[str, "MCPServerLocalSession"] | None = None,
     ) -> None:
         super().__init__()
         self._refcount = 0
@@ -147,6 +165,8 @@ class MCPServerLocalSession(MCPServer):
         self._name = name
         self._events = events
         self._timeout = timeout
+        self._cache_key = cache_key
+        self._task_sessions = task_sessions
         self._session: ClientSession | None = None
         self._exit_stack: AsyncExitStack | None = None
         self._cached_tool_list: list[MCPTool] | None = None
@@ -159,20 +179,30 @@ class MCPServerLocalSession(MCPServer):
         else:
             assert self._refcount == 0
             self._exit_stack = AsyncExitStack()
-            await self._exit_stack.__aenter__()
-            with trace_action(logger, "MCPServer", f"create client ({self._name})"):
-                read, write, *_ = await self._exit_stack.enter_async_context(
-                    self._client()
-                )
-            with trace_action(logger, "MCPServer", f"create session ({self._name})"):
-                self._session = await self._exit_stack.enter_async_context(
-                    ClientSession(read, write, sampling_callback=self._sampling_fn())
-                )
-            with trace_action(
-                logger, "MCPServer", f"initialize session ({self._name})"
-            ):
-                await self._session.initialize()
-            self._refcount = 1
+            try:
+                await self._exit_stack.__aenter__()
+                with trace_action(logger, "MCPServer", f"create client ({self._name})"):
+                    read, write, *_ = await self._exit_stack.enter_async_context(
+                        self._client()
+                    )
+                with trace_action(
+                    logger, "MCPServer", f"create session ({self._name})"
+                ):
+                    self._session = await self._exit_stack.enter_async_context(
+                        ClientSession(
+                            read, write, sampling_callback=self._sampling_fn()
+                        )
+                    )
+                with trace_action(
+                    logger, "MCPServer", f"initialize session ({self._name})"
+                ):
+                    await self._session.initialize()
+                self._refcount = 1
+            except BaseException:
+                # a partially-created session must not stay registered under
+                # the task id: a later task reusing the id would adopt it
+                await self._close_and_evict()
+                raise
 
         return self
 
@@ -189,11 +219,28 @@ class MCPServerLocalSession(MCPServer):
             with trace_action(logger, "MCPServer", f"disconnect ({self._name})"):
                 assert self._session is not None
                 assert self._exit_stack is not None
-                try:
-                    await self._exit_stack.aclose()
-                finally:
-                    self._session = None
-                    self._exit_stack = None
+                await self._close_and_evict()
+
+    async def _close_and_evict(self) -> None:
+        # Close the session and drop it from the per-task registry. Eviction
+        # matters because task ids can be reused after a task is collected
+        # (id()-based on asyncio): without it, a later task landing on a
+        # reused id would find this closed session and its stale cached tool
+        # list. The identity check guards against evicting a replacement
+        # registered under the same key.
+        try:
+            if self._exit_stack is not None:
+                await self._exit_stack.aclose()
+        finally:
+            self._session = None
+            self._exit_stack = None
+            self._cached_tool_list = None
+            if (
+                self._task_sessions is not None
+                and self._cache_key is not None
+                and self._task_sessions.get(self._cache_key) is self
+            ):
+                del self._task_sessions[self._cache_key]
 
     @override
     async def tools(self) -> list[Tool]:
@@ -232,30 +279,33 @@ class MCPServerLocalSession(MCPServer):
                             # but its JSON-RPC error never wakes this await) deadlocks
                             # the call FOREVER, ignoring the per-RPC timeout entirely.
                             # On expiry `ClientSession` raises an McpError carrying
-                            # an HTTP 408 (REQUEST_TIMEOUT) code, which the handler
-                            # below translates to a TimeoutError so the outer handler
+                            # a request-timeout code, which the handler below
+                            # translates to a TimeoutError so the outer handler
                             # surfaces a ToolError — notifying the model rather than
                             # letting the sample hang until the working-time cap.
-                            read_timeout = (
-                                timedelta(seconds=self._timeout)
-                                if self._timeout is not None
-                                else None
-                            )
                             result = await tool_session.call_tool(
                                 mcp_tool.name,
                                 kwargs,
-                                read_timeout_seconds=read_timeout,
+                                read_timeout_seconds=read_timeout_arg(self._timeout),
                             )
-                            if result.isError:
+                            # mcp 2.x types call_tool as returning a union that
+                            # includes input-required/claimed results, but those
+                            # are raised (not returned) unless explicitly enabled
+                            # via allow_input_required/allow_claimed.
+                            if not isinstance(result, CallToolResult):
+                                raise RuntimeError(
+                                    f"Unexpected MCP call_tool result: {type(result)}"
+                                )
+                            if result_is_error(result):
                                 raise ToolError(tool_result_as_text(result.content))
                         except McpError as e:
                             # A read_timeout_seconds expiry surfaces as an McpError
-                            # carrying HTTP 408 (REQUEST_TIMEOUT). Re-raise it as a
+                            # carrying a request-timeout code. Re-raise it as a
                             # TimeoutError so the outer handler converts it to a
                             # ToolError; exception_for_rpc_response_error would
-                            # otherwise map the unrecognized 408 to a RuntimeError
+                            # otherwise map the unrecognized code to a RuntimeError
                             # that errors the sample instead of reaching the model.
-                            if e.error.code == _MCP_READ_TIMEOUT_CODE:
+                            if e.error.code in MCP_READ_TIMEOUT_CODES:
                                 raise TimeoutError(e.error.message) from e
                             # Some errors that are raised via McpError (e.g. -32603)
                             # need to be converted to ToolError so that they make it
@@ -277,7 +327,7 @@ class MCPServerLocalSession(MCPServer):
                 raise
 
         # get parameters (fill in missing ones)
-        parameters = ToolParams.model_validate(mcp_tool.inputSchema)
+        parameters = ToolParams.model_validate(tool_input_schema(mcp_tool))
         for name, param in parameters.properties.items():
             param.description = param.description or name
 
@@ -353,7 +403,7 @@ def create_server_streamablehttp(
 ) -> MCPServer:
     return MCPServerLocal(
         lambda: streamablehttp_client(url, headers, timeout, sse_read_timeout),
-        name=url,
+        name=name,
         events=True,
     )
 
