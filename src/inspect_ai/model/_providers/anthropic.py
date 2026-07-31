@@ -542,14 +542,9 @@ class AnthropicAPI(ModelAPI):
             if FALLBACK_BETA not in betas and _input_has_fallback(input):
                 betas.append(FALLBACK_BETA)
 
-            # resolve betas and extra headers — preserve any client default
-            # betas (e.g. oauth-2025-04-20 set via ANTHROPIC_AUTH_TOKEN)
+            # resolve betas and extra headers
             if len(betas) > 0:
-                for b in self._client_default_betas():
-                    if b not in betas:
-                        betas.insert(0, b)
-                betas = list(dict.fromkeys(betas))  # remove duplicates
-                extra_headers["anthropic-beta"] = ",".join(betas)
+                extra_headers["anthropic-beta"] = self._beta_header_value(betas)
             request["extra_headers"] = extra_headers
 
             # mcp servers
@@ -649,10 +644,17 @@ class AnthropicAPI(ModelAPI):
         messages = neutralize_thinking_for_token_counting(messages)
         normalize_document_citations(messages)
 
+        # Honor per-request extra headers (config.extra_headers), mirroring
+        # generate — pull any anthropic-beta values out of the headers so
+        # they merge with the betas collected below.
+        headers: dict[str, str] = (
+            (config.extra_headers or {}).copy() if config is not None else {}
+        )
+        betas: list[str] = self._pull_betas_from_headers(headers)
+
         # Beta opt-ins required for special content in the history. The API
         # validates content block types for token counting too, so replayed
         # compaction and fallback blocks need the same betas as generate.
-        betas: list[str] = []
         request_extra: dict[str, Any] = {}
         if has_compaction:
             betas.append("compact-2026-01-12")
@@ -662,7 +664,9 @@ class AnthropicAPI(ModelAPI):
         if has_fallback:
             betas.append(FALLBACK_BETA)
         if betas:
-            request_extra["extra_headers"] = {"anthropic-beta": ",".join(betas)}
+            headers["anthropic-beta"] = self._beta_header_value(betas)
+        if headers:
+            request_extra["extra_headers"] = headers
 
         response = await self.client.messages.count_tokens(
             model=self.service_model_name(),
@@ -857,6 +861,34 @@ class AnthropicAPI(ModelAPI):
         )
         return [b.strip() for b in client_beta.split(",") if b.strip()]
 
+    @staticmethod
+    def _pull_betas_from_headers(headers: dict[str, str]) -> list[str]:
+        """Pop anthropic-beta values out of extra headers.
+
+        Accepts the `anthropic_beta` underscore convention and the literal
+        `anthropic-beta` header spelling; header names are case-insensitive,
+        so match case-insensitively. Mutates `headers`, removing matched keys.
+        """
+        beta_keys = [
+            k for k in headers if k.lower() in ("anthropic_beta", "anthropic-beta")
+        ]
+        return [
+            beta
+            for key in beta_keys
+            for b in headers.pop(key).split(",")
+            if (beta := b.strip())
+        ]
+
+    def _beta_header_value(self, betas: list[str]) -> str:
+        """Value for a per-request anthropic-beta header.
+
+        A per-request anthropic-beta header overrides the client default
+        header rather than merging with it, so fold in any client default
+        betas (e.g. oauth-2025-04-20 set via ANTHROPIC_AUTH_TOKEN) and
+        de-duplicate.
+        """
+        return ",".join(dict.fromkeys(self._client_default_betas() + betas))
+
     def completion_config(
         self, config: GenerateConfig
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str], list[str]]:
@@ -875,16 +907,7 @@ class AnthropicAPI(ModelAPI):
         params = dict(model=self.service_model_name(), max_tokens=max_tokens)
         headers: dict[str, str] = (config.extra_headers or {}).copy()
         extra_body: dict[str, Any] = {}
-        betas: list[str] = self.betas.copy()
-
-        # pull betas out of headers (accept the underscore convention and the
-        # literal 'anthropic-beta' header spelling; header names are
-        # case-insensitive, so match case-insensitively)
-        for key in list(headers.keys()):
-            if key.lower() in ("anthropic_beta", "anthropic-beta"):
-                anthropic_beta_header = headers.pop(key)
-                if anthropic_beta_header:
-                    betas.extend([h.strip() for h in anthropic_beta_header.split(",")])
+        betas: list[str] = self.betas + self._pull_betas_from_headers(headers)
 
         # Claude 4.7+ is always in adaptive thinking and rejects these params
         # regardless of config; other models only reject them under thinking.
@@ -1022,6 +1045,24 @@ class AnthropicAPI(ModelAPI):
             # pass through context_management for compaction
             if CONTEXT_MANAGEMENT in config.extra_body:
                 extra_body[CONTEXT_MANAGEMENT] = config.extra_body[CONTEXT_MANAGEMENT]
+            # Pass through a caller-supplied `fallbacks` directive verbatim (the
+            # agent bridge forwards Claude Code's own server-side fallback
+            # request this way). `config.fallback_models` above already wrote
+            # this key, so an explicit Inspect-level setting wins; otherwise the
+            # client's directive is honoured untouched. The beta is appended here
+            # rather than relying on the caller's `anthropic-beta` header, so the
+            # directive cannot be silently ignored by the API. Skipped on
+            # bedrock/vertex/azure, which do not accept the field at all (the same
+            # endpoints `fallback_models` warns about above) -- forwarding it
+            # there would fail the request rather than degrade gracefully.
+            if (
+                FALLBACKS_FIELD in config.extra_body
+                and FALLBACKS_FIELD not in extra_body
+                and not (self.is_bedrock() or self.is_vertex() or self.is_azure())
+            ):
+                extra_body[FALLBACKS_FIELD] = config.extra_body[FALLBACKS_FIELD]
+                if FALLBACK_BETA not in betas:
+                    betas.append(FALLBACK_BETA)
 
         # return config
         return params, extra_body, headers, betas
@@ -1269,11 +1310,10 @@ class AnthropicAPI(ModelAPI):
             return True
         if _CACHE_DIAGNOSIS_BETA in self._client_default_betas():
             return True
-        for key, val in (config.extra_headers or {}).items():
-            if key.lower() in ("anthropic_beta", "anthropic-beta") and val:
-                if _CACHE_DIAGNOSIS_BETA in [b.strip() for b in val.split(",")]:
-                    return True
-        return False
+        # extraction pops matched keys, so pass a throwaway copy
+        return _CACHE_DIAGNOSIS_BETA in self._pull_betas_from_headers(
+            dict(config.extra_headers or {})
+        )
 
     @override
     def connection_key(self) -> str:
@@ -3786,6 +3826,9 @@ EXTRA_BODY = "extra_body"
 CONTEXT_MANAGEMENT = "context_management"
 MIN_COMPACTION_TOKENS = 50000  # Anthropic API minimum trigger value
 FALLBACK_BETA = "server-side-fallback-2026-06-01"
+# Request-body field carrying a server-side refusal fallback directive. Routed
+# via extra_body because the SDK only exposes it on client.beta.messages.create.
+FALLBACKS_FIELD = "fallbacks"
 
 
 def _add_edit_compaction(

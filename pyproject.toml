@@ -24,6 +24,14 @@ git_describe_command = [
 where = ["src"]
 include = ["inspect_ai*"]
 
+# Keep the ts-mono TS source out of the wheel: the git-tracked files are
+# pruned in MANIFEST.in (include-package-data pulls the manifest into the
+# wheel), while this exclude stops the package-data globs below (e.g.
+# **/*.yml) from picking up untracked files inside ts-mono such as
+# node_modules. The viewer ships prebuilt as _view/dist.
+[tool.setuptools.exclude-package-data]
+inspect_ai = ["_view/ts-mono*"]
+
 [tool.setuptools.package-data]
 inspect_ai = [
     "binaries/*",
@@ -96,6 +104,12 @@ norecursedirs = [
   "tests/test_task_list",
 ]
 log_level = "WARNING"
+
+[tool.mutmut]
+paths_to_mutate = ["src/inspect_ai/model/_generate_accounting.py"]
+tests_dir = ["tests/model/test_generate_accounting.py"]
+pytest_add_cli_args = ["-q"]
+also_copy = ["src/inspect_ai"]
 
 [tool.mypy]
 exclude = [
