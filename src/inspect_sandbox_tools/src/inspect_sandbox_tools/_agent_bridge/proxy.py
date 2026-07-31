@@ -721,7 +721,7 @@ async def model_proxy_server(
             stream = json_body.get("stream", False)
 
             completion = await call_bridge_model_service_async(
-                "generate_responses", json_data=json_body
+                "generate_responses", json_data=json_body, headers=request["headers"]
             )
 
             error = _provider_error(completion)
@@ -1454,7 +1454,7 @@ async def model_proxy_server(
             json_body["parallel_tool_calls"] = False
 
             completion = await call_bridge_model_service_async(
-                "generate_completions", json_data=json_body
+                "generate_completions", json_data=json_body, headers=request["headers"]
             )
 
             error = _provider_error(completion)
@@ -1703,7 +1703,9 @@ async def model_proxy_server(
                     PING_INTERVAL_S = 5.0
                     task = asyncio.create_task(
                         call_bridge_model_service_async(
-                            "generate_anthropic", json_data=json_body
+                            "generate_anthropic",
+                            json_data=json_body,
+                            headers=request["headers"],
                         )
                     )
                     try:
@@ -2018,7 +2020,9 @@ async def model_proxy_server(
                 }
             else:
                 completion = await call_bridge_model_service_async(
-                    "generate_anthropic", json_data=json_body
+                    "generate_anthropic",
+                    json_data=json_body,
+                    headers=request["headers"],
                 )
                 error = _provider_error(completion)
                 if error is not None:
