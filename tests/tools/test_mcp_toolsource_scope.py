@@ -6,14 +6,22 @@ shared -- inspect eval builds one per Task and every sample uses it -- so
 caching the resolved list on the instance handed later samples tools bound to
 the FIRST sample's session, and their tool calls then executed in that sample's
 sandbox while their own sandbox was never touched.
+
+The cache scope token is the per-task session OBJECT rather than the raw
+anyio task id: on asyncio the task id is id()-based and can be reused once an
+earlier task is garbage collected, so two tasks can share an id over time.
+Sessions therefore evict themselves from the per-task registry when they
+close, and the tool source re-resolves whenever the session object changes.
 """
 
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 import anyio
 
+from inspect_ai.tool._mcp._local import MCPServerLocal
 from inspect_ai.tool._mcp.tools import MCPToolSourceLocal
 
 
@@ -22,6 +30,10 @@ class _FakeServer:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.scope_token: object = object()
+
+    def _tool_cache_scope(self) -> object:
+        return self.scope_token
 
     async def tools(self) -> list[Any]:
         self.calls += 1
@@ -33,8 +45,12 @@ class _FakeServer:
         return [tool_a]
 
 
+def _never_client() -> Any:
+    raise AssertionError("transport must not be used by these tests")
+
+
 def test_tools_are_reresolved_when_the_scope_changes() -> None:
-    """Two async tasks must not share a resolved tool list."""
+    """A new session object (e.g. a new sample's task) must not see cached tools."""
     server = _FakeServer()
     source = MCPToolSourceLocal(server, "all")  # type: ignore[arg-type]
     seen: list[str] = []
@@ -45,8 +61,10 @@ def test_tools_are_reresolved_when_the_scope_changes() -> None:
 
     async def main() -> None:
         await caller()
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(caller)
+        # a fresh per-task session -- however the task id compares -- means a
+        # fresh scope token, and the cached list must be discarded
+        server.scope_token = object()
+        await caller()
 
     anyio.run(main)
 
@@ -72,3 +90,58 @@ def test_tools_are_cached_within_one_scope() -> None:
     assert server.calls == 1, (
         f"expected a single resolution per scope, got {server.calls}"
     )
+
+
+def test_task_session_is_evicted_when_it_closes() -> None:
+    """A reused task id must get a fresh session, not a closed one.
+
+    Calling _task_session() twice from one task uses the same registry key --
+    exactly what a later task reusing a collected task's id would present. If
+    the closed session were not evicted, the second lookup would return it
+    (and its stale cached tool list).
+    """
+    server = MCPServerLocal(_never_client, name=f"evict-{uuid4()}", events=False)
+
+    async def main() -> None:
+        s1 = server._task_session()
+        assert server._task_session() is s1, "session should be cached per task"
+        await s1._close_and_evict()
+        s2 = server._task_session()
+        assert s2 is not s1, "a closed session must not be handed out again"
+        await s2._close_and_evict()
+
+    anyio.run(main)
+
+
+def test_close_does_not_evict_a_replacement_session() -> None:
+    """Eviction is identity-guarded: closing an old session must not drop a new one."""
+    server = MCPServerLocal(_never_client, name=f"guard-{uuid4()}", events=False)
+
+    async def main() -> None:
+        s1 = server._task_session()
+        await s1._close_and_evict()
+        s2 = server._task_session()
+        # closing the OLD session again must leave the replacement registered
+        await s1._close_and_evict()
+        assert server._task_session() is s2, (
+            "closing a stale session evicted its replacement"
+        )
+        await s2._close_and_evict()
+
+    anyio.run(main)
+
+
+def test_tool_cache_scope_tracks_the_live_session() -> None:
+    """MCPServerLocal's cache token is the session object itself."""
+    server = MCPServerLocal(_never_client, name=f"scope-{uuid4()}", events=False)
+
+    async def main() -> None:
+        s1 = server._task_session()
+        assert server._tool_cache_scope() is s1
+        await s1._close_and_evict()
+        token = server._tool_cache_scope()
+        assert token is not s1, "cache token still points at a closed, evicted session"
+        assert isinstance(token, type(s1))
+        await server._task_session()._close_and_evict()
+
+    anyio.run(main)
