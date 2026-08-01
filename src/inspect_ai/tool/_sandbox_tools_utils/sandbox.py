@@ -372,6 +372,16 @@ async def _download_from_s3(filename: str) -> bool:
     Handles expected failures (404 - not yet promoted) silently.
     Logs unexpected failures but doesn't raise exceptions.
     """
+    if _BUCKET_BASE_URL == _DEFAULT_BUCKET_BASE_URL:
+        # The fork's distribution bucket doesn't exist yet; the default URL is a
+        # placeholder. Skip the network attempt entirely so resolution falls
+        # through to the local Docker build instead of dying on DNS.
+        trace_message(
+            logger,
+            TRACE_SANDBOX_TOOLS,
+            f"no distribution bucket configured; skipping download of {filename}",
+        )
+        return False
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Download the executable
@@ -394,6 +404,15 @@ async def _download_from_s3(filename: str) -> bool:
             print(f"Executable '{filename}' not found on S3")
             return False
         raise
+    except httpx.TransportError as e:
+        # An unreachable or misconfigured bucket must not be fatal: falling
+        # through to the local build is always preferable to failing injection
+        # (a DNS failure here used to surface as SandboxInjectionError).
+        logger.warning(
+            f"Failed to reach sandbox-tools bucket for '{filename}' ({e}); "
+            "falling back to a local build."
+        )
+        return False
 
 
 async def _build_it(arch: Architecture, musl: bool, dev_executable_name: str) -> None:
