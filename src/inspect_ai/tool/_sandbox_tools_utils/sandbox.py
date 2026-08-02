@@ -388,7 +388,9 @@ async def _download_from_s3(filename: str) -> bool:
         )
         return False
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # follow_redirects: GitHub release-asset URLs answer 302 to a CDN host;
+        # plain S3 URLs never did, so the original client didn't need it.
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             # Download the executable
             response = await client.get(f"{_BUCKET_BASE_URL}/{filename}")
             response.raise_for_status()
