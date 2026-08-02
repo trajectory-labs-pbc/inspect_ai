@@ -1,0 +1,111 @@
+# FORK-ONLY. Upstream builds these executables (build_sandbox_tools.yml) and leaves them as
+# workflow artifacts for a maintainer to promote to S3 by hand. The fork's distribution point is
+# the rolling "sandbox-tools" release on this repository, which is what the in-tree default
+# INSPECT_SANDBOX_TOOLS_BASE_URL resolves to, so publishing has to be automatic: a version bump
+# that ships without its assets leaves every consumer falling back to a local Docker build, or
+# failing outright where Docker is unavailable (the replay path).
+
+name: Publish Sandbox Tools (fork)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_version.txt"
+      - "src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_fork_revision.txt"
+      - "src/inspect_sandbox_tools/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write # gh release create/upload
+
+concurrency:
+  # One publisher at a time: two runs uploading the same filenames would race on --clobber.
+  group: publish-sandbox-tools
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish v{version}-tl{fork_rev}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          base="src/inspect_ai/tool/_sandbox_tools_utils"
+          version=$(tr -d '[:space:]' < "$base/sandbox_tools_version.txt")
+          fork_rev=$(tr -d '[:space:]' < "$base/sandbox_tools_fork_revision.txt")
+          [[ "$version" =~ ^[0-9]+$ ]] || { echo "::error::version must be an integer, got '$version'"; exit 1; }
+          [[ "$fork_rev" =~ ^[0-9]+$ ]] || { echo "::error::fork revision must be an integer, got '$fork_rev'"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "fork_rev=$fork_rev" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Set up QEMU
+        # arm64 executables are cross-built on an amd64 runner.
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Install build dependencies
+        run: pip install pydantic
+
+      - name: Build all executables
+        run: |
+          cd src/inspect_ai/tool/_sandbox_tools_utils
+          python build_within_container.py --all --dev=false
+
+      - name: Ensure the rolling release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view sandbox-tools >/dev/null 2>&1; then
+            gh release create sandbox-tools \
+              --title "sandbox-tools binaries" \
+              --notes "Rolling distribution point for this fork's inspect-sandbox-tools executables. Filenames carry the version (inspect-sandbox-tools-{arch}[-musl]-v{N}-tl{M}), so every version's assets coexist here and the base URL never changes. Published by .github/workflows/publish_sandbox_tools.yml."
+          fi
+
+      - name: Publish executables
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SANDBOX_TOOLS_REPO: ${{ github.repository }}
+        run: |
+          cd src/inspect_ai/tool/_sandbox_tools_utils
+          python upload_to_github_release.py "${{ steps.version.outputs.version }}"
+
+      - name: Verify each asset is readable at the URL the runtime composes
+        # The failure that motivated this workflow was never a broken build -- it was an
+        # artifact that could not be fetched at the URL the client asks for (placeholder
+        # base URL, unfollowed redirect, missing asset). Prove the round trip.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          FORK_REV: ${{ steps.version.outputs.fork_rev }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/sandbox-tools"
+          for arch in amd64 arm64; do
+            for libc in "" "-musl"; do
+              name="inspect-sandbox-tools-${arch}${libc}-v${VERSION}-tl${FORK_REV}"
+              local_file="src/inspect_ai/binaries/${name}"
+              curl -fsSL "${base}/${name}" -o "/tmp/${name}.published"
+              local_sum=$(sha256sum "$local_file" | cut -d' ' -f1)
+              published_sum=$(sha256sum "/tmp/${name}.published" | cut -d' ' -f1)
+              if [ "$local_sum" != "$published_sum" ]; then
+                echo "::error::${name}: published asset differs from the built artifact"
+                exit 1
+              fi
+              echo "verified ${name} (${local_sum})"
+            done
+          done

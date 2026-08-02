@@ -13,6 +13,7 @@ Usage: python -m inspect_ai.tool._sandbox_tools_utils.upload_to_github_release 2
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,7 +40,9 @@ else:
         )
 
 BINARIES_DIR = Path(__file__).parent.parent.parent / "binaries"
-REPO = "trajectory-labs-pbc/inspect_ai"
+# Overridable so CI publishes to the repository it is running in rather than a
+# hardcoded one (a fork of the fork must not push assets to ours).
+REPO = os.environ.get("SANDBOX_TOOLS_REPO", "trajectory-labs-pbc/inspect_ai")
 RELEASE_TAG = "sandbox-tools"
 ARCHS: tuple[SandboxToolsArch, ...] = ("amd64", "arm64")
 
