@@ -1,7 +1,13 @@
 ## Unreleased
 
 - Sandbox: Large sandbox-tool responses are transferred intact instead of corrupting JSON-RPC frames when they exceed the sandbox exec output limit.
+- Sandbox: Service method errors no longer include the host-side traceback in the response delivered into the sandbox; the traceback is logged host-side instead. (#4673)
 - Agent Bridge: Fix for `message_limit`/`token_limit`/`cost_limit` errors not being properly raised when running in a sandbox.
+- Agent Bridge: `agent_bridge()` and `sandbox_agent_bridge()` now accept a `response_filter` for transforming model output before it is returned.
+- Agent Bridge: Client-supplied HTTP headers are now forwarded through the sandbox agent-bridge model proxy to the bridged model request.
+- Agent Bridge: Bridged Anthropic requests now preserve `system` block boundaries, so instruction blocks are no longer silently discarded by the API.
+- Agent Bridge: Image tool results now reach sandboxed agents as MCP image content instead of being flattened to text.
+- Agent Bridge: Side calls to a different model can no longer displace the tracked agent conversation, regardless of thread shape.
 - Bugfix: Reading eval logs with field exclusion (e.g. header-only reads) no longer crashes under a trio event loop; the pure-Python ijson backend is now selected when the C backend's asyncio-only async parser is unavailable. (#4589)
 - Control Channel: `inspect ctl sample list`/`show` now report a running sample's in-flight activity (`generating 7:12`, `bash 0:41`, `retrying in 0:45`), and `sample events` renders pending events, so long model calls and retry backoffs no longer read as silent idle.
 - Retry: Samples reused from a prior attempt no longer stay resident in memory awaiting a flush, and are written to the new attempt's log (readable by `inspect ctl` and viewers) as soon as the reuse sweep completes.
@@ -32,6 +38,7 @@
 - Inspect View: Fixed viewer to show the Action tab first for annotated browser actions. (#429)
 - Inspect View: Downloads of large local log files no longer fail, and the view server stays responsive while reading or listing large local logs.
 - MCP: Support the mcp 2.0 package (in addition to mcp 1.x), whose breaking API redesign previously made all `mcp_server_*()` tools fail. (meridianlabs-ai/inspect_ai#170)
+- MCP: A shared `ToolSource` no longer serves one sample's tools to another; cached tools are re-resolved when the async scope changes.
 - MCP: `mcp_server_http()` no longer ignores its `name` argument (the server was always named after the URL).
 - Performance: Message preparation for providers that extract tool-result media into user messages now scales linearly with conversation length rather than quadratically.
 - Smaller downloads: the wheel no longer includes the accidentally-bundled log viewer TypeScript source, and the sdist no longer includes tests, docs, or lockfiles.
@@ -42,7 +49,12 @@
 - Control Channel: Samples resolved via `--action error` now log the error message `Sample errored: interrupted by operator` and report status `error` (previously the raw cancellation message, misreported as `cancelled`).
 - Bugfix: `text_editor()` paths containing a null byte now return a tool error to the model instead of crashing the tool. (#4659)
 - Bugfix: Anthropic: `count_tokens()` now sends `extra_headers` from the generate config (including any `anthropic-beta` values), matching `generate()`. (#4606)
+- Anthropic: A client-supplied `fallbacks` directive is now forwarded to the API verbatim instead of being dropped (skipped on bedrock/vertex/azure, which reject the field).
 - Bugfix: Compaction: Fix `CompactionEdit` clearing server-side tool uses at stale message indices when `keep_tool_inputs=False` removes client-side tool messages, which raised `IndexError` or wrote a tool use into an unrelated message. (#4528)
+- Agent Bridge: a bare model name arriving on a provider-specific bridge endpoint (`openai`/`google`/`anthropic`) now resolves to that provider (`resolve_inspect_model(..., provider=)`) instead of being rejected as unqualified, so bridge clients can send plain model names like `gpt-5.1`.
+- Bugfix: MCP sandbox sessions are now cached per tool-source instance and cleared on close, so one instance's sessions and tool lists no longer leak into another's.
+- Agent Bridge: A bridged client that sends the eval model's concrete id instead of `inspect` (claude_code sends e.g. `claude-fable-5`) now resolves to the eval's own `Model` instance rather than a second one built by `get_model()`, whose memoization key includes the config. Previously such a client got a distinct instance, and since the eval's `GenerateConfig` is only applied to the active model, eval-level options such as `fallback_models` were silently dropped before the provider request. Aliases, model roles, and any other model the client names are unaffected.
+- Human Agent: `human_cli()` now accepts a `customize_commands` option for tailoring the commands available in the human agent CLI.
 
 ## 0.3.251 (29 July 2026)
 

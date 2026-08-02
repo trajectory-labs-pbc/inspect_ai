@@ -17,15 +17,35 @@ from typing import (
     Awaitable,
     Callable,
     Iterator,
+    Literal,
     Optional,
     TypeAlias,
 )
 from urllib.parse import parse_qs, unquote, urlparse
 
+from typing_extensions import TypedDict
+
 # ---------- Types ----------
 RequestHandler: TypeAlias = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 RouteMap: TypeAlias = dict[str, RequestHandler]
 MethodRoutes: TypeAlias = dict[str, RouteMap]
+JsonValue: TypeAlias = (
+    None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+)
+
+
+class MCPTextContent(TypedDict):
+    type: Literal["text"]
+    text: str
+
+
+class MCPImageContent(TypedDict):
+    type: Literal["image"]
+    data: str
+    mimeType: str
+
+
+MCPToolContent: TypeAlias = MCPTextContent | MCPImageContent
 
 # ---------- Limits / Defaults ----------
 MAX_HEADER_BYTES = 64 * 1024
@@ -701,7 +721,7 @@ async def model_proxy_server(
             stream = json_body.get("stream", False)
 
             completion = await call_bridge_model_service_async(
-                "generate_responses", json_data=json_body
+                "generate_responses", json_data=json_body, headers=request["headers"]
             )
 
             error = _provider_error(completion)
@@ -1434,7 +1454,7 @@ async def model_proxy_server(
             json_body["parallel_tool_calls"] = False
 
             completion = await call_bridge_model_service_async(
-                "generate_completions", json_data=json_body
+                "generate_completions", json_data=json_body, headers=request["headers"]
             )
 
             error = _provider_error(completion)
@@ -1683,7 +1703,9 @@ async def model_proxy_server(
                     PING_INTERVAL_S = 5.0
                     task = asyncio.create_task(
                         call_bridge_model_service_async(
-                            "generate_anthropic", json_data=json_body
+                            "generate_anthropic",
+                            json_data=json_body,
+                            headers=request["headers"],
                         )
                     )
                     try:
@@ -1998,7 +2020,9 @@ async def model_proxy_server(
                 }
             else:
                 completion = await call_bridge_model_service_async(
-                    "generate_anthropic", json_data=json_body
+                    "generate_anthropic",
+                    json_data=json_body,
+                    headers=request["headers"],
                 )
                 error = _provider_error(completion)
                 if error is not None:
@@ -2178,7 +2202,7 @@ async def model_proxy_server(
                     arguments=arguments,
                 )
                 return _jsonrpc_response(
-                    req_id, {"content": [{"type": "text", "text": result}]}
+                    req_id, {"content": _mcp_tool_result_content(result)}
                 )
 
             else:
@@ -2193,6 +2217,34 @@ async def model_proxy_server(
 
     # return configured server
     return server
+
+
+def _mcp_tool_result_content(result: JsonValue) -> list[MCPToolContent]:
+    match result:
+        case str():
+            return [{"type": "text", "text": result}]
+        case list():
+            return [_mcp_tool_content_block(block) for block in result]
+        case _:
+            return [_mcp_tool_content_block(result)]
+
+
+def _mcp_tool_content_block(content: JsonValue) -> MCPToolContent:
+    match content:
+        case {"type": "image", "image": str() as image}:
+            metadata, separator, data = image.removeprefix("data:").partition(",")
+            if image.startswith("data:") and separator and metadata.endswith(";base64"):
+                mime_type = metadata.removesuffix(";base64").split(";", 1)[0]
+                return {
+                    "type": "image",
+                    "data": data,
+                    "mimeType": mime_type or "image/png",
+                }
+            return {"type": "text", "text": image}
+        case {"type": "text", "text": str() as text}:
+            return {"type": "text", "text": text}
+        case _:
+            return {"type": "text", "text": json.dumps(content)}
 
 
 async def run_model_proxy_server() -> None:
