@@ -11,21 +11,45 @@ import pytest
 from inspect_ai.tool._sandbox_tools_utils import sandbox as sandbox_mod
 
 
-async def test_placeholder_bucket_skips_download_without_network() -> None:
-    """The unset-placeholder URL short-circuits to False (no network attempt)."""
+async def test_default_url_attempts_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-tree default URL is a REAL distribution point and must be tried.
 
-    def _no_network(*args: object, **kwargs: object) -> None:
-        raise AssertionError("network must not be touched for the placeholder URL")
+    (A previous revision short-circuited on the default when it was a
+    placeholder; that guard must never come back now that the default works.)
+    """
+    requested: list[str] = []
 
-    original_client = httpx.AsyncClient
-    httpx.AsyncClient = _no_network  # type: ignore[assignment,misc]
-    try:
-        assert (
-            await sandbox_mod._download_from_s3("inspect-sandbox-tools-amd64-v26-tl1")
-            is False
-        )
-    finally:
-        httpx.AsyncClient = original_client  # type: ignore[misc]
+    class _FakeResponse:
+        status_code = 404
+        content = b""
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError(
+                "not found",
+                request=httpx.Request("GET", "https://x"),
+                response=httpx.Response(404),
+            )
+
+    class _FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None: ...
+        async def get(self, url: str) -> _FakeResponse:
+            requested.append(url)
+            return _FakeResponse()
+
+    # NOT overriding _BUCKET_BASE_URL: the point is that the DEFAULT gets tried.
+    assert sandbox_mod._BUCKET_BASE_URL == sandbox_mod._DEFAULT_BUCKET_BASE_URL
+    monkeypatch.setattr(sandbox_mod.httpx, "AsyncClient", _FakeClient)
+    assert (
+        await sandbox_mod._download_from_s3("inspect-sandbox-tools-amd64-v26-tl1")
+        is False  # 404 degrades gracefully...
+    )
+    assert requested == [
+        f"{sandbox_mod._DEFAULT_BUCKET_BASE_URL}/inspect-sandbox-tools-amd64-v26-tl1"
+    ]  # ...but the network WAS attempted against the default URL.
 
 
 async def test_unreachable_bucket_returns_false(
