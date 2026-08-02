@@ -36,8 +36,13 @@ from ._build_config import (
     config_to_filename,
 )
 
-_DEFAULT_BUCKET_BASE_URL: Final = "https://TODO-fork-sandbox-tools-bucket.invalid"
-"""TODO: Replace after the Pulumi bucket lane publishes the production URL."""
+_DEFAULT_BUCKET_BASE_URL: Final = (
+    "https://github.com/trajectory-labs-pbc/inspect_ai/releases/download/sandbox-tools"
+)
+"""The fork's binary distribution point: assets on the rolling 'sandbox-tools'
+GitHub release. Filenames are versioned (…-v{N}-tl{M}), so the base URL is
+stable; publishing a new version means uploading new assets to the same
+release (see upload_to_github_release in this package)."""
 
 _BUCKET_BASE_URL = os.environ.get(
     "INSPECT_SANDBOX_TOOLS_BASE_URL", _DEFAULT_BUCKET_BASE_URL
