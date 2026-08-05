@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Agent Bridge: Client-supplied HTTP headers are now forwarded through the sandbox agent-bridge model proxy to the bridged model request.
+- Agent Bridge: A bridged client's `reasoning` options now reach the model request verbatim when forwarding generation config, preserving fields like `context` that were previously dropped.
 - Scoring: New `precomputed_scores()` scorer applies scores computed outside of Inspect (e.g. human ratings) from a JSON or JSON Lines file, matched to samples by id and epoch.
 - Bugfix: `file_dataset()` now recognizes JSON and CSV URLs with query parameters while preserving the complete URL passed to the selected dataset reader.
 - Scoring: `model_graded_qa`/`model_graded_fact` now leave a sample unscored when the default grader's final `GRADE:` verdict is a letter the instructions never offered, instead of scoring a grade mentioned earlier in its reasoning. Note: re-scoring existing logs may shift metrics and sample counts — samples whose grader verdict was off-menu (including `P` grades when `partial_credit` is disabled) were previously scored from an earlier on-menu mention and are now unscored with `grade_parse_failure` recorded.
