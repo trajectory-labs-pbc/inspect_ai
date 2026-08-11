@@ -23,6 +23,12 @@ from test_helpers.utils import (
 )
 
 from inspect_ai import Task, eval, task
+from inspect_ai._eval._workers.limits import (
+    resolve_worker_environment_limits,
+    resolve_worker_limits,
+)
+from inspect_ai._eval._workers.manifest import ShardManifest, WorkerLimitsManifest
+from inspect_ai._eval._workers.partition import partition_samples
 from inspect_ai._eval.evalset import (
     _GENERATE_CONFIG_FIELDS_TO_EXCLUDE,
     EvalSetArgsInTaskIdentifier,
@@ -45,6 +51,7 @@ from inspect_ai.event import SampleInitEvent
 from inspect_ai.log._edit import ProvenanceData, invalidate_samples
 from inspect_ai.log._file import (
     EvalLogInfo,
+    is_log_file,
     list_eval_logs,
     read_eval_log,
     write_eval_log,
@@ -107,6 +114,125 @@ def test_eval_set(retry_immediate: bool) -> None:
         )
         assert not success
         assert logs[0].status == "error"
+
+
+def test_shard_log_path_is_not_a_log_file() -> None:
+    assert not is_log_file(
+        "logs/.shards/eval-set/task/w0/2026-08-11T00-00-00_task_1.eval",
+        [".eval", ".json"],
+    )
+    assert is_log_file("logs/2026-08-11T00-00-00_task_1.eval", [".eval", ".json"])
+
+
+def test_partition_samples_is_deterministic_and_balanced() -> None:
+    sample_ids: list[int | str] = [10, "z", 2, 1, "a"]
+
+    shards = partition_samples(sample_ids, 3)
+
+    assert shards == [[1, "a"], [2, "z"], [10]]
+    assert partition_samples(list(reversed(sample_ids)), 3) == shards
+    assert {sample_id for shard in shards for sample_id in shard} == set(sample_ids)
+    assert max(map(len, shards)) - min(map(len, shards)) <= 1
+
+
+def test_partition_samples_clamps_to_selected_samples() -> None:
+    assert partition_samples([2, 1], 8) == [[1], [2]]
+
+
+def test_worker_limits_divide_effective_default_caps() -> None:
+    limits = resolve_worker_limits(
+        workers=4,
+        max_connections=None,
+        adaptive_connections=None,
+        batch=False,
+        model_max_connections=12,
+        max_samples=None,
+        max_sandboxes=None,
+        sandbox_default_concurrency=16,
+        max_subprocesses=None,
+        default_max_subprocesses=8,
+        max_dataset_memory=None,
+    )
+
+    assert limits.max_connections == 25
+    assert limits.adaptive_connections is False
+    assert limits.max_samples == 25
+    assert limits.max_sandboxes == 4
+    assert limits.max_subprocesses == 2
+    assert limits.max_dataset_memory is None
+    assert limits.max_tasks == 1
+
+
+def test_worker_limits_divide_explicit_caps_with_ceiling() -> None:
+    limits = resolve_worker_limits(
+        workers=4,
+        max_connections=13,
+        adaptive_connections=True,
+        batch=False,
+        model_max_connections=99,
+        max_samples=5,
+        max_sandboxes=1,
+        sandbox_default_concurrency=None,
+        max_subprocesses=1,
+        default_max_subprocesses=8,
+        max_dataset_memory=3,
+    )
+
+    assert limits.max_connections == 4
+    assert limits.max_samples == 2
+    assert limits.max_sandboxes == 1
+    assert limits.max_subprocesses == 1
+    assert limits.max_dataset_memory == 1
+
+
+def test_worker_environment_limits_divide_explicit_and_default_caps() -> None:
+    assert resolve_worker_environment_limits(
+        {"INSPECT_MAX_POD_OPS": "768", "INSPECT_MAX_HELM_INSTALL": "8"},
+        workers=4,
+        cpu_count=16,
+    ) == {
+        "INSPECT_MAX_POD_OPS": "192",
+        "INSPECT_MAX_HELM_INSTALL": "2",
+        "INSPECT_MAX_HELM_UNINSTALL": "2",
+    }
+    assert (
+        resolve_worker_environment_limits({}, workers=1000, cpu_count=None)[
+            "INSPECT_MAX_POD_OPS"
+        ]
+        == "1"
+    )
+
+
+def test_shard_manifest_rejects_unsupported_version() -> None:
+    with pytest.raises(ValueError, match="Unsupported worker manifest version"):
+        ShardManifest(
+            version=2,
+            mode="run",
+            eval_set_id="set",
+            task_id="task",
+            worker_index=0,
+            worker_count=1,
+            task_spec="tasks.py@task",
+            task_args={},
+            model="mockllm/model",
+            model_base_url=None,
+            model_args={},
+            model_roles={},
+            sample_ids=[1],
+            epochs=1,
+            epochs_reducer=None,
+            log_dir="/tmp/log",
+            worker_limits=WorkerLimitsManifest(
+                max_connections=1,
+                adaptive_connections=False,
+                max_samples=1,
+                max_sandboxes=None,
+                max_subprocesses=1,
+                max_dataset_memory=None,
+                max_tasks=1,
+            ),
+            eval_kwargs={},
+        )
 
 
 @pytest.mark.slow
