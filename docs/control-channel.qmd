@@ -136,6 +136,10 @@ fR8mWn2cQspD  inspect_evals/humaneval     anthropic/claude-sonnet-5  generate  1
 
 Each row is one task: retried tasks stay on a single row (with an `attempts` column showing how many attempts have run), and an `errors` column appears when any samples have errored. The `solver` column shows the plan's terminal solver (the agent name, e.g. `react`, for an agentic task). With `--json`, the response is an `{as_of, tasks}` envelope and each task row also carries `pid`, `socket_path`, and `log_location` (where results are being written — the handle for reading logs after the run).
 
+Two more columns appear only when they have something to report: `refusals` (model refusals) and `http_retries` (rate-limit and transient HTTP retries). Both are running totals over the task's own samples — the finished ones plus the live counts of those still in flight — so they are readable mid-run rather than only at the end. Both are always present in the `--json` row. They count every *attempt*, so a sample retried under `retry_on_error` contributes what each attempt saw; these are counts of things that happened, not properties of a final state. Note `http_retries` is unrelated to `attempts` (whole-task retries) and to a sample's own `retries` (failed attempts of that sample).
+
+These are the same events the TUI footer tallies, but attributed per eval rather than per process — which is what makes them usable from `inspect ctl` at all, since one process commonly runs several evals at once and a detached run has no display to print a footer. An event reported outside any sample is counted in the process-global total only, so it appears in the footer and in no task row.
+
 A task is finished exactly when `completed_at` is non-null; `status` (`running` / `completed`) is derived from it. Don't infer completion from sample counts — a cancelled or errored eval finishes with `completed < total`.
 
 ## Selecting a Task
@@ -337,6 +341,20 @@ $ inspect ctl process anomalies 12345
 ```
 
 Unlike the other reads, this one opens the process's trace file directly rather than asking the process — so it works even against a process too busy or wedged to answer (the escalation path when another command reports "busy"), and even post-mortem: passing the pid of an exited process reads its trace file (kept on disk for the last 10 runs) to show what was in flight when it died, with durations dated to the file's last write. With no `PID` it reads every running Inspect process, one section per pid.
+
+## Reads Against a Busy Eval
+
+The control server is embedded in the eval process and shares its event loop, so its response latency tracks how loaded the eval is. Under heavy load a perfectly healthy server can take tens of seconds to answer — probing a ten-process eval-set sweep driving ~2400 sandboxes, the same `GET /config` returned in 2.3s, 7.9s and 79.3s on consecutive attempts. Reads therefore retry a timeout several times before giving up, and report `busy` rather than claiming the eval is gone.
+
+When the default per-attempt timeout is too short for your workload, raise it for the invocation:
+
+```bash
+INSPECT_CTL_REQUEST_TIMEOUT=120 inspect ctl task
+```
+
+The value is in seconds and is read per command, so it applies to the invocation that sets it. An unusable value (non-numeric, zero, negative) is an error rather than a silent revert to the default, so a raised timeout that never took effect cannot be mistaken for a still-unresponsive eval. Mutations get the same budget, scaled by the retry count.
+
+A command that reads *every* discovered process contacts them concurrently (in bounded waves when many are running), so one loaded process no longer delays the rest — with several evals running, a serial fan-out would spend each process's full retry budget before contacting the next. Results are still ordered by discovery, so which process answers first does not change what a command reports. If a process stays busy through its retries, escalate to `inspect ctl process anomalies <pid>`, which reads the trace file directly and does not need the process to answer.
 
 ## Configuration
 

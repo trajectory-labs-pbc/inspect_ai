@@ -7,6 +7,7 @@ dependencies = { file = ["requirements.txt"] }
 optional-dependencies.dev = { file = ["requirements-dev.txt"] }
 optional-dependencies.doc = { file = ["requirements-doc.txt"] }
 optional-dependencies.dist = { file = ["requirements-dist.txt"] }
+optional-dependencies.math = { file = ["requirements-math.txt"] }
 
 [tool.setuptools_scm]
 git_describe_command = [
@@ -104,6 +105,12 @@ norecursedirs = [
   "tests/test_task_list",
 ]
 log_level = "WARNING"
+
+[tool.mutmut]
+paths_to_mutate = ["src/inspect_ai/model/_generate_accounting.py"]
+tests_dir = ["tests/model/test_generate_accounting.py"]
+pytest_add_cli_args = ["-q"]
+also_copy = ["src/inspect_ai"]
 
 [tool.mypy]
 exclude = [

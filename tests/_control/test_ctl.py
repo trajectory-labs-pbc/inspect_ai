@@ -6,6 +6,7 @@ output contract (envelopes, unconditional task_id, mutation results,
 cursor validation), and rendering helpers.
 """
 
+import functools
 import json
 import os
 from pathlib import Path
@@ -124,6 +125,74 @@ def test_tasks_table_hides_solver_column_when_absent(
     header = capsys.readouterr().out.splitlines()[0]
     assert "model" in header
     assert "solver" not in header
+
+
+def test_tasks_table_shows_refusal_and_retry_columns_only_when_nonzero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Zero is the usual value for both, so a standing pair of 0 columns is clutter.
+
+    Same rule as `errors` / `attempts`: the column earns its width by having
+    something to report. The `--json` row always carries both keys.
+    """
+    _print_human_table([_task_row("aaa111", "t1", refusals=0, http_retries=0)])
+    header = capsys.readouterr().out.splitlines()[0]
+    assert "refusals" not in header and "http_retries" not in header
+
+    _print_human_table(
+        [
+            _task_row("aaa111", "t1", refusals=2, http_retries=0),
+            _task_row("bbb222", "t2", refusals=0, http_retries=9),
+        ]
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert "refusals" in lines[0] and "http_retries" in lines[0]
+    assert "2" in next(ln for ln in lines if ln.startswith("aaa111"))
+    assert "9" in next(ln for ln in lines if ln.startswith("bbb222"))
+
+
+def test_tasks_table_survives_a_server_that_omits_the_counters(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An older server reports neither key; that must read as "nothing to show"."""
+    _print_human_table([_task_row("aaa111", "t1", model="openai/gpt-5")])
+    header = capsys.readouterr().out.splitlines()[0]
+    assert "refusals" not in header and "http_retries" not in header
+
+
+def test_tasks_table_leaves_an_unreported_count_blank_not_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """In a mixed-version fleet, `0` would assert "none happened" about an unknown.
+
+    Observed live: rows from an older server sat at `0` beside a task that had in
+    fact retried many times. Blank is the honest cell, matching how the samples
+    table renders an unknown turn count.
+    """
+    _print_human_table(
+        [
+            _task_row("aaa111", "t1", http_retries=7),  # this server reports
+            _task_row("bbb222", "t2"),  # this one does not
+            _task_row("ccc333", "t3", http_retries=0),  # reports, and it is zero
+        ]
+    )
+    lines = capsys.readouterr().out.splitlines()
+    header = lines[0]
+    assert "http_retries" in header
+    # Slice by the header's own column offset. Splitting on whitespace cannot work
+    # here: the cell under test is EMPTY on one row, so a split would silently
+    # return a neighbouring column's token and the assertion would pass for the
+    # wrong reason (the `samples` cell contains spaces too).
+    start = header.index("http_retries")
+    width = len("http_retries")
+
+    def cell(prefix: str) -> str:
+        row = next(ln for ln in lines if ln.startswith(prefix))
+        return row[start : start + width].strip()
+
+    assert cell("aaa111") == "7"
+    assert cell("bbb222") == "", "an unreported count must not read as zero"
+    assert cell("ccc333") == "0"
 
 
 def _sample(
@@ -927,17 +996,32 @@ def test_resolve_target_server_none_running_exits(
 
 
 def _stub_httpx(
-    monkeypatch: pytest.MonkeyPatch, sequence: list[object]
+    monkeypatch: pytest.MonkeyPatch,
+    sequence: list[object] | None = None,
+    *,
+    per_socket: dict[int, list[object]] | None = None,
 ) -> dict[str, int]:
-    """Replace httpx in ctl so each ``client.get`` consumes one ``sequence`` item.
+    """Replace httpx in ctl so each ``client.get`` consumes one scripted item.
 
     Each item is either an ``Exception`` to raise (e.g. a ``TimeoutException``),
-    a payload to return from ``response.json()``, or a ``(status_code, payload)``
-    tuple for a non-200 response. Returns a dict whose ``"gets"`` entry counts
-    how many requests were attempted.
+    a payload to return from ``response.json()``, a ``(status_code, payload)``
+    tuple for a non-200 response, or a zero-arg callable invoked at request time
+    to produce one of those (letting a test block inside a read). Returns a dict
+    whose ``"gets"`` entry counts how many requests were attempted.
+
+    ``sequence`` scripts one shared queue every request pops from, which is only
+    deterministic while requests are issued one at a time. ``per_socket`` scripts
+    a separate queue per pid (keyed off the ``uds`` path the transport is built
+    with), so a test stays deterministic when the fan-out reads servers
+    CONCURRENTLY and the completion order is not the submission order. Pass
+    exactly one of the two.
     """
+    assert (sequence is None) != (per_socket is None), (
+        "pass exactly one of sequence / per_socket"
+    )
     counter = {"gets": 0, "posts": 0, "patches": 0}
-    seq = list(sequence)
+    seq = list(sequence or [])
+    queues = {pid: list(items) for pid, items in (per_socket or {}).items()}
 
     class _Resp:
         def __init__(self, payload: object, status_code: int = 200) -> None:
@@ -959,9 +1043,16 @@ def _stub_httpx(
         def json(self) -> object:
             return self._payload
 
+    class _Transport:
+        """Stand-in for httpx.HTTPTransport that remembers its socket path."""
+
+        def __init__(self, uds: str | None) -> None:
+            self.uds = uds
+
     class _Client:
         def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
+            transport = kwargs.get("transport")
+            self._uds = getattr(transport, "uds", None)
 
         def __enter__(self) -> "_Client":
             return self
@@ -969,9 +1060,19 @@ def _stub_httpx(
         def __exit__(self, *args: object) -> None:
             pass
 
+        def _queue(self) -> list[object]:
+            """The response script this client reads from."""
+            if not queues:
+                return seq
+            # /tmp/<pid>.sock — see _disc()
+            stem = Path(str(self._uds)).stem
+            return queues[int(stem)]
+
         def _next(self, kind: str) -> _Resp:
             counter[kind] += 1
-            item = seq.pop(0)
+            item = self._queue().pop(0)
+            if callable(item):
+                item = item()
             if isinstance(item, Exception):
                 raise item
             if isinstance(item, tuple):
@@ -992,7 +1093,10 @@ def _stub_httpx(
             return getattr(self, method)(path, params)
 
     monkeypatch.setattr("inspect_ai._cli.ctl.httpx.Client", _Client)
-    monkeypatch.setattr("inspect_ai._cli.ctl.httpx.HTTPTransport", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "inspect_ai._cli.ctl.httpx.HTTPTransport",
+        lambda *a, **k: _Transport(k.get("uds")),
+    )
     return counter
 
 
@@ -1002,6 +1106,68 @@ def _disc(pid: int) -> "DiscoveredControlServer":
     return DiscoveredControlServer(
         pid=pid, socket_path=Path(f"/tmp/{pid}.sock"), started_at=0.0
     )
+
+
+def test_request_timeout_default_and_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``INSPECT_CTL_REQUEST_TIMEOUT`` raises the per-attempt read timeout.
+
+    The default is deliberately finite, but a loaded eval's control server can
+    take far longer than it to answer (measured: a correct 200 after 79s from a
+    process driving a large sandbox fleet), so an operator needs to buy patience
+    without editing the source. Read per call, not captured at import, so it
+    applies to the invocation that sets it.
+    """
+    from inspect_ai._cli.ctl import (
+        _REQUEST_ATTEMPTS,
+        _REQUEST_TIMEOUT,
+        _mutation_timeout,
+        _request_timeout,
+    )
+
+    monkeypatch.delenv("INSPECT_CTL_REQUEST_TIMEOUT", raising=False)
+    assert _request_timeout() == _REQUEST_TIMEOUT
+    assert _mutation_timeout() == _REQUEST_ATTEMPTS * _REQUEST_TIMEOUT
+
+    monkeypatch.setenv("INSPECT_CTL_REQUEST_TIMEOUT", "120")
+    assert _request_timeout() == 120.0
+    # the mutation budget tracks it — they describe the same slow server
+    assert _mutation_timeout() == _REQUEST_ATTEMPTS * 120.0
+
+
+@pytest.mark.parametrize("value", ["nonsense", "", "0", "-5"])
+def test_request_timeout_env_invalid_raises(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """An unusable override fails loudly rather than silently reverting.
+
+    Matches how the sandbox limit env vars validate. Silently substituting the
+    default is the worse outcome here: an operator who set 120 would wait 15s
+    and conclude the fleet is wedged -- the exact failure this override exists
+    to end.
+    """
+    from inspect_ai._cli.ctl import _request_timeout
+
+    monkeypatch.setenv("INSPECT_CTL_REQUEST_TIMEOUT", value)
+    with pytest.raises(ValueError, match="INSPECT_CTL_REQUEST_TIMEOUT"):
+        _request_timeout()
+
+
+def test_request_timeout_override_reaches_the_retry_narration(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The override is what the retry loop actually waits on and reports."""
+    import httpx
+
+    from inspect_ai._cli.ctl import _get_with_retry
+
+    monkeypatch.setenv("INSPECT_CTL_REQUEST_TIMEOUT", "42")
+    _stub_httpx(monkeypatch, [httpx.ReadTimeout("slow"), [{"task_id": "a"}]])
+    assert _get_with_retry("/tmp/x.sock", "/tasks", what="Reading tasks") == [
+        {"task_id": "a"}
+    ]
+    assert "no response after 42s" in capsys.readouterr().err
 
 
 def test_get_with_retry_retries_timeout_then_succeeds(
@@ -1138,6 +1304,10 @@ def test_fetch_summaries_busy_server_skipped_when_degradable(
 
     The unscoped sample fan-out's summaries stage: one busy sibling process
     (on the degraded attempt budget) must not kill the whole listing.
+
+    Scripted per socket, not as one shared queue: this fan-out reads both
+    servers concurrently, so which pid pops which response would otherwise
+    depend on thread scheduling.
     """
     import httpx
 
@@ -1145,7 +1315,10 @@ def test_fetch_summaries_busy_server_skipped_when_degradable(
 
     _stub_httpx(
         monkeypatch,
-        [httpx.ReadTimeout("slow")] * _DEGRADED_READ_ATTEMPTS + [[{"task_id": "live"}]],
+        per_socket={
+            7: [httpx.ReadTimeout("slow")] * _DEGRADED_READ_ATTEMPTS,
+            8: [[{"task_id": "live"}]],
+        },
     )
     fetched = _fetch_summaries([_disc(7), _disc(8)], raise_on_busy=True)
     assert [s["task_id"] for s in fetched.summaries] == ["live"]
@@ -1155,6 +1328,45 @@ def test_fetch_summaries_busy_server_skipped_when_degradable(
     assert "try again shortly" in err
     # the skip note teaches the escalation that works against a busy process
     assert "inspect ctl process anomalies 7" in err
+
+
+def test_fetch_summaries_reads_servers_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full fan-out reads every server at once, not one after another.
+
+    Serially, one loaded eval spends its whole attempt budget before the next is
+    contacted, so N processes cost N * attempts * timeout and a multi-process
+    sweep can spend minutes printing nothing. Each stub read blocks on a barrier
+    that only trips once ALL of them have arrived, so this deadlocks (and fails
+    on the barrier timeout) if the reads are issued one at a time.
+    """
+    import threading
+
+    from inspect_ai._cli.ctl import _fetch_summaries
+
+    servers = [_disc(pid) for pid in (7, 8, 9)]
+    barrier = threading.Barrier(len(servers), timeout=10)
+
+    def arrive(pid: int) -> list[dict[str, Any]]:
+        barrier.wait()
+        return [{"task_id": f"task-{pid}"}]
+
+    # one scripted read per server, each blocking until every server has arrived
+    _stub_httpx(
+        monkeypatch,
+        per_socket={s.pid: [functools.partial(arrive, s.pid)] for s in servers},
+    )
+
+    fetched = _fetch_summaries(servers)
+
+    # rows follow DISCOVERY order, not completion order
+    assert [s["task_id"] for s in fetched.summaries] == [
+        "task-7",
+        "task-8",
+        "task-9",
+    ]
+    assert [s["pid"] for s in fetched.summaries] == [7, 8, 9]
 
 
 def test_fetch_summaries_sole_server_rides_full_budget(

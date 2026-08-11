@@ -7,7 +7,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from logging import getLogger
 from pathlib import PurePath
-from typing import Any, Awaitable, Callable, Literal, NamedTuple, TypeAlias
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Literal,
+    NamedTuple,
+    Sequence,
+    TypeAlias,
+)
 
 import anyio
 from anyio.abc import TaskGroup
@@ -175,7 +184,7 @@ from inspect_ai.util._span import span
 from inspect_ai.util._store import init_subtask_store
 
 from ..context import init_task_context
-from ..task import Task
+from ..task import SampleResource, Task
 from .enqueue import get_task_enqueuer
 from .error import SampleErrorHandler, _should_eval_fail
 from .generate import task_generate
@@ -185,7 +194,7 @@ from .images import (
     state_without_base64_content,
     states_with_base64_content,
 )
-from .log import TaskLogger, collect_eval_data, log_start
+from .log import TaskLogger, collect_eval_data, plan_to_eval_plan
 from .results import eval_results
 from .sample_source import (
     SampleEnqueuer,
@@ -687,7 +696,8 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
     ) as td:
         # start the log (do this outside fo the try b/c the try/except assumes
         # that the log is initialized)
-        await log_start(logger, plan, generate_config)
+        eval_plan = plan_to_eval_plan(plan, generate_config)
+        await logger.log_start(eval_plan)
 
         try:
             # return immediately if we are not running samples
@@ -695,7 +705,7 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                 return await logger.log_finish("started", stats)
 
             # call hook
-            await emit_task_start(logger)
+            await emit_task_start(logger, eval_plan)
 
             sample_semaphore = create_sample_semaphore(
                 config,
@@ -1039,6 +1049,7 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                         scorer_names=scorer_names,
                         scanner=scanner,
                         cleanup=task.cleanup,
+                        sample_resources=task.sample_resources,
                         generate=generate,
                         progress=progress,
                         logger=logger if log_samples else None,
@@ -1605,6 +1616,39 @@ def _sample_started() -> float | None:
     return started.timestamp() if started is not None else None
 
 
+@contextlib.asynccontextmanager
+async def _sample_resources_cm(
+    resources: "Sequence[SampleResource]", state: TaskState
+) -> AsyncIterator[None]:
+    """Hold a sample's `Task.sample_resources` open for its whole run.
+
+    Entered and exited in the sample's own task, so a resource may span setup,
+    solver and scoring without the task-affine teardown problem an
+    `AsyncExitStack` carried across tasks would have.
+
+    The cancel scope encloses the resources rather than being entered in the
+    `finally`: anyio requires scopes to exit in reverse entry order, so a scope
+    opened after the resources' own scopes (e.g. the task group inside an MCP
+    connection) makes teardown die with "Attempted to exit a cancel scope that
+    isn't the current tasks's current cancel scope". Flipping `shield` on the
+    already-innermost-compatible scope protects teardown from cancellation
+    arriving after the body without changing scope order; resources that must
+    survive an already-delivered cancellation shield their own teardown (as the
+    MCP server kill path does).
+    """
+    if not resources:
+        yield
+        return
+    with anyio.CancelScope() as scope:
+        async with contextlib.AsyncExitStack() as exit_stack:
+            for resource in resources:
+                await exit_stack.enter_async_context(resource(state))
+            try:
+                yield
+            finally:
+                scope.shield = True
+
+
 async def task_run_sample(
     *,
     task: Task,
@@ -1622,6 +1666,7 @@ async def task_run_sample(
     scorer_names: list[str] | None,
     scanner: "Scanners | None",
     cleanup: Callable[[TaskState], Awaitable[None]] | None,
+    sample_resources: "Sequence[SampleResource]",
     generate: Generate,
     progress: Callable[[int], None],
     logger: TaskLogger | None,
@@ -1888,7 +1933,7 @@ async def task_run_sample(
                         sample_summary,
                     )
 
-                async with sandboxenv_cm:
+                async with sandboxenv_cm, _sample_resources_cm(sample_resources, state):
                     try:
                         # update active sample wth sandboxes now that we are initialised
                         # (ensure that we still exit init context in presence of sandbox error)
@@ -2410,6 +2455,7 @@ async def task_run_sample(
             scorer_names=scorer_names,
             scanner=scanner,
             cleanup=cleanup,
+            sample_resources=sample_resources,
             generate=generate,
             progress=progress,
             logger=logger,

@@ -52,8 +52,11 @@ from .util import (
     apply_message_ids,
     bridge_generate,
     clear_generation_params,
+    relax_tool_choice_for_withheld,
     resolve_generate_config,
     resolve_inspect_model,
+    validate_bridge_media,
+    withheld_bridge_tool,
 )
 
 logger = getLogger(__name__)
@@ -61,13 +64,19 @@ logger = getLogger(__name__)
 
 async def inspect_google_api_request_impl(
     json_data: dict[str, Any],
-    web_search_providers: WebSearchProviders,
-    code_execution_providers: CodeExecutionProviders,
+    web_search_providers: WebSearchProviders | None,
+    code_execution_providers: CodeExecutionProviders | None,
     bridge: AgentBridge,
 ) -> dict[str, Any]:
     # resolve model
     bridge_model_name = str(json_data.get("model", "inspect"))
-    model = resolve_inspect_model(bridge_model_name, bridge.model_aliases, bridge.model)
+    model = resolve_inspect_model(
+        bridge_model_name,
+        bridge.model_aliases,
+        bridge.model,
+        model_resolver=bridge.model_resolver,
+        provider="google",
+    )
 
     # extract request components
     contents: list[dict[str, Any]] = json_data.get("contents", [])
@@ -100,10 +109,13 @@ async def inspect_google_api_request_impl(
     )
 
     # translate tool choice
-    tool_choice = tool_choice_from_google_tool_config(tool_config)
+    tool_choice = relax_tool_choice_for_withheld(
+        tool_choice_from_google_tool_config(tool_config), tools
+    )
 
     # translate messages
     messages = messages_from_google_contents(contents, system_instruction)
+    validate_bridge_media(bridge, messages)
     debug_log("INSPECT MESSAGES", messages)
 
     # extract generate config
@@ -127,7 +139,7 @@ async def inspect_google_api_request_impl(
     debug_log("INSPECT OUTPUT", output.message)
 
     # update state if we have more messages than the last generation
-    await bridge._track_state(messages, output)
+    await bridge._track_state(messages, output, str(ModelName(model)))
 
     # translate response to Gemini format
     response = gemini_response_from_output(output, model.api.model_name)
@@ -177,8 +189,8 @@ def generate_config_from_google(generation_config: dict[str, Any]) -> GenerateCo
 
 def tools_from_google_tools(
     google_tools: list[dict[str, Any]] | None,
-    web_search_providers: WebSearchProviders,
-    code_execution_providers: CodeExecutionProviders,
+    web_search_providers: WebSearchProviders | None,
+    code_execution_providers: CodeExecutionProviders | None,
 ) -> list[ToolInfo | Tool]:
     tools: list[ToolInfo | Tool] = []
 
@@ -200,13 +212,17 @@ def tools_from_google_tools(
                         else ToolParams(),
                     )
                 )
-        elif "googleSearch" in google_tool:
-            tools.append(web_search(web_search_providers))
+        elif "googleSearch" in google_tool or "googleSearchRetrieval" in google_tool:
+            # googleSearchRetrieval is the grounding variant; both map to search
+            if web_search_providers is None:
+                withheld_bridge_tool("googleSearch")
+            else:
+                tools.append(web_search(web_search_providers))
         elif "codeExecution" in google_tool:
-            tools.append(code_execution(providers=code_execution_providers))
-        elif "googleSearchRetrieval" in google_tool:
-            # Google Search Retrieval (grounding)
-            tools.append(web_search(web_search_providers))
+            if code_execution_providers is None:
+                withheld_bridge_tool("codeExecution")
+            else:
+                tools.append(code_execution(providers=code_execution_providers))
         elif "computerUse" in google_tool:
             tools.append(computer())
 
