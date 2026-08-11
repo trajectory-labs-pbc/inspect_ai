@@ -1147,6 +1147,8 @@ _timestamp_prefix_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}[:-]\d{2}[:-]\d{2}")
 
 def is_log_file(file: str, extensions: list[str]) -> bool:
     parts = file.replace("\\", "/").split("/")
+    if ".shards" in parts:
+        return False
     name = parts[-1]
 
     if name.endswith(f".{EVAL_LOG_FORMAT}"):

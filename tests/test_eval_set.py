@@ -23,6 +23,7 @@ from test_helpers.utils import (
 )
 
 from inspect_ai import Task, eval, task
+from inspect_ai._eval._workers.partition import partition_samples
 from inspect_ai._eval.evalset import (
     _GENERATE_CONFIG_FIELDS_TO_EXCLUDE,
     EvalSetArgsInTaskIdentifier,
@@ -45,6 +46,7 @@ from inspect_ai.event import SampleInitEvent
 from inspect_ai.log._edit import ProvenanceData, invalidate_samples
 from inspect_ai.log._file import (
     EvalLogInfo,
+    is_log_file,
     list_eval_logs,
     read_eval_log,
     write_eval_log,
@@ -107,6 +109,29 @@ def test_eval_set(retry_immediate: bool) -> None:
         )
         assert not success
         assert logs[0].status == "error"
+
+
+def test_shard_log_path_is_not_a_log_file() -> None:
+    assert not is_log_file(
+        "logs/.shards/eval-set/task/w0/2026-08-11T00-00-00_task_1.eval",
+        [".eval", ".json"],
+    )
+    assert is_log_file("logs/2026-08-11T00-00-00_task_1.eval", [".eval", ".json"])
+
+
+def test_partition_samples_is_deterministic_and_balanced() -> None:
+    sample_ids: list[int | str] = [10, "z", 2, 1, "a"]
+
+    shards = partition_samples(sample_ids, 3)
+
+    assert shards == [[1, "a"], [2, "z"], [10]]
+    assert partition_samples(list(reversed(sample_ids)), 3) == shards
+    assert {sample_id for shard in shards for sample_id in shard} == set(sample_ids)
+    assert max(map(len, shards)) - min(map(len, shards)) <= 1
+
+
+def test_partition_samples_clamps_to_selected_samples() -> None:
+    assert partition_samples([2, 1], 8) == [[1], [2]]
 
 
 @pytest.mark.slow
