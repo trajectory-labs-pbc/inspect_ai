@@ -144,9 +144,7 @@ def test_openai_responses_preserves_opaque_reasoning_when_forwarding():
         "reasoning": {"context": "all_turns", "effort": "max", "summary": "auto"},
     }
 
-    config = generate_config_from_openai_responses(
-        json_data, forward_reasoning=True
-    )
+    config = generate_config_from_openai_responses(json_data, forward_reasoning=True)
 
     # The provider synthesizes a new ``reasoning`` object from these structured
     # fields, which would overwrite the opaque object below and drop ``context``.
