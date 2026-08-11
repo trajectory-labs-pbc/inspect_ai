@@ -1083,6 +1083,7 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                         previous_attempt_errors=previous_attempt_errors,
                         turn_limit=config.turn_limit,
                         time_limit=config.time_limit,
+                        scoring_time_limit=config.scoring_time_limit,
                         working_limit=config.working_limit,
                         semaphore=gated_sample_semaphore,
                         eval_set_id=logger.eval.eval_set_id,
@@ -1685,6 +1686,7 @@ async def task_run_sample(
     previous_attempt_errors: list[EvalRetryError],
     turn_limit: int | None,
     time_limit: int | None,
+    scoring_time_limit: int | None,
     working_limit: int | None,
     semaphore: contextlib.AbstractAsyncContextManager[Any],
     eval_set_id: str | None,
@@ -2176,13 +2178,16 @@ async def task_run_sample(
                     # mark completed
                     state.completed = True
 
-                    # set timeout for scoring. if the original timeout was hit we still
-                    # want to provide opportunity for scoring, but we don't necessarily
-                    # want to wait the full timeout again (especially in the case where
-                    # the cause of the timeout is a hung container and scoring requires
-                    # interacting with the container). as a middle ground we use half
-                    # of the original timeout value for scoring.
-                    scoring_time_limit = time_limit / 2 if time_limit else None
+                    # Score every sample after its body completes. By default, scoring gets
+                    # half the sample time limit; an explicit limit supports scorers that
+                    # make slow model calls or interact with the sample sandbox.
+                    score_time_limit: float | None = (
+                        scoring_time_limit
+                        if scoring_time_limit is not None
+                        else time_limit / 2
+                        if time_limit
+                        else None
+                    )
 
                     set_sample_state(state)
                     if state.scores is None:
@@ -2199,7 +2204,7 @@ async def task_run_sample(
                         )
                         try:
                             # timeout during scoring will result in an ordinary sample error
-                            with create_time_limit(scoring_time_limit):
+                            with create_time_limit(score_time_limit):
                                 # score on success, or when score_on_error is on
                                 # for the final attempt (no retries left, not cancelled)
                                 if error is None or (
@@ -2476,6 +2481,7 @@ async def task_run_sample(
             previous_attempt_errors=previous_attempt_errors,
             turn_limit=turn_limit,
             time_limit=time_limit,
+            scoring_time_limit=scoring_time_limit,
             working_limit=working_limit,
             semaphore=semaphore,
             eval_set_id=eval_set_id,

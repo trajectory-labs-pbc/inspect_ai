@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from inspect_ai import Task, eval, task
 from inspect_ai._cli.eval import RunConfigInput, eval_command, eval_retry_command
 from inspect_ai._util.error import PrerequisiteError
-from inspect_ai.log import EvalLog
+from inspect_ai.log import EvalConfig, EvalLog
 from inspect_ai.log._file import list_eval_logs, read_eval_log
 from inspect_ai.model import get_model
 from inspect_ai.solver import solver
@@ -61,6 +61,14 @@ def test_run_config_rejects_unknown_generate_config_field():
 def test_run_config_rejects_unknown_eval_config_field():
     with pytest.raises(ValidationError, match="[Uu]nknown"):
         RunConfigInput.model_validate({"eval_config": {"limit": 10, "bad_field": 1}})
+
+
+@pytest.mark.parametrize("scoring_time_limit", [0, -1])
+def test_eval_config_rejects_nonpositive_scoring_time_limit(
+    scoring_time_limit: int,
+):
+    with pytest.raises(ValidationError, match="greater than 0"):
+        EvalConfig(scoring_time_limit=scoring_time_limit)
 
 
 def test_eval_config_task():

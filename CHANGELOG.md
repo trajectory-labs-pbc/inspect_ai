@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Eval: scoring can use an explicit per-sample time limit when the default half of the sample limit is insufficient.
 - Eval: added opt-in `INSPECT_GC_MODE=low_latency` to suppress automatic full collections during high-concurrency runs while retaining a cgroup-memory guard.
 - Agent Bridge: a bare model name arriving on a provider-specific bridge endpoint (`openai`/`google`/`anthropic`) now resolves to that provider (`resolve_inspect_model(..., provider=)`) instead of being rejected as unqualified, so bridge clients can send plain model names like `gpt-5.1`.
 - Agent Bridge: `agent_bridge()` and `sandbox_agent_bridge()` now accept a `response_filter` for transforming model output before it is returned.

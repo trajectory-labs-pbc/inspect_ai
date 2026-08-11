@@ -126,6 +126,7 @@ class EvalSetArgsInTaskIdentifier:
     token_limit: int | TokenLimit | None = None
     turn_limit: int | None = None
     time_limit: int | None = None
+    scoring_time_limit: int | None = None
     working_limit: int | None = None
     cost_limit: float | None = None
 
@@ -174,6 +175,7 @@ def eval_set(
     token_limit: int | str | TokenLimit | None = None,
     turn_limit: int | None = None,
     time_limit: int | None = None,
+    scoring_time_limit: int | None = None,
     working_limit: int | None = None,
     cost_limit: float | None = None,
     model_cost_config: str | dict[str, ModelCost] | None = None,
@@ -300,6 +302,7 @@ def eval_set(
             "output:1m", or "(input*0.1)+output:1m".
         turn_limit: Limit on total turns (model generations) used for each sample.
         time_limit: Limit on clock time (in seconds) for samples.
+        scoring_time_limit: Limit on clock time (in seconds) for scoring each sample.
         working_limit: Limit on working time (in seconds) for sample. Working
             time includes model generation, tool calls, etc. but does not include
             time spent waiting on retries or shared resources.
@@ -434,6 +437,7 @@ def eval_set(
             token_limit=token_limit,
             turn_limit=turn_limit,
             time_limit=time_limit,
+            scoring_time_limit=scoring_time_limit,
             working_limit=working_limit,
             cost_limit=cost_limit,
             model_cost_config=model_cost_config,
@@ -605,6 +609,7 @@ def eval_set(
             token_limit=token_limit,
             turn_limit=turn_limit,
             time_limit=time_limit,
+            scoring_time_limit=scoring_time_limit,
             working_limit=working_limit,
             cost_limit=cost_limit,
         )

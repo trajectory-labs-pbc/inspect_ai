@@ -32,7 +32,7 @@ from inspect_ai.scorer._target import Target
 from inspect_ai.solver import Generate, TaskState, solver
 from inspect_ai.solver._solver import Solver, generate
 from inspect_ai.util._concurrency import concurrency
-from inspect_ai.util._limit import TokenLimit, sample_limits
+from inspect_ai.util._limit import TokenLimit, sample_limits, time_limit as create_time_limit
 
 
 @pytest.fixture(autouse=True)
@@ -384,6 +384,58 @@ def test_time_limit_scorer():
     )[0]
     assert log.status == "success"
     check_limit_event(log, "time")
+
+
+@pytest.mark.parametrize(
+    ("time_limit", "expected_scoring_time_limit"), [(10, 5), (None, None)]
+)
+def test_scoring_time_limit_defaults_to_half_of_sample_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    time_limit: int | None,
+    expected_scoring_time_limit: float | None,
+):
+    observed_limits: list[float | None] = []
+    original_create_time_limit = create_time_limit
+
+    def record_time_limit(limit: float | None):
+        observed_limits.append(limit)
+        return original_create_time_limit(limit)
+
+    monkeypatch.setattr(
+        "inspect_ai._eval.task.run.create_time_limit", record_time_limit
+    )
+
+    log = eval(
+        Task(scorer=slow_scorer(0)), model="mockllm/model", time_limit=time_limit
+    )[0]
+
+    assert log.status == "success"
+    assert observed_limits[-1] == expected_scoring_time_limit
+
+
+def test_scoring_time_limit_override_reaches_scoring_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    observed_limits: list[float | None] = []
+    original_create_time_limit = create_time_limit
+
+    def record_time_limit(limit: float | None):
+        observed_limits.append(limit)
+        return original_create_time_limit(limit)
+
+    monkeypatch.setattr(
+        "inspect_ai._eval.task.run.create_time_limit", record_time_limit
+    )
+
+    log = eval(
+        Task(scorer=slow_scorer(0)),
+        model="mockllm/model",
+        time_limit=10,
+        scoring_time_limit=7,
+    )[0]
+
+    assert log.status == "success"
+    assert observed_limits[-1] == 7
 
 
 @skip_if_no_openai

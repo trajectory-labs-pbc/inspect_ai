@@ -164,6 +164,9 @@ class EvalConfig(BaseModel):
     time_limit: int | None = Field(default=None)
     """Maximum clock time per sample."""
 
+    scoring_time_limit: int | None = Field(default=None, gt=0)
+    """Maximum clock time for scoring each sample."""
+
     working_limit: int | None = Field(default=None)
     """Meximum working time per sample."""
 
