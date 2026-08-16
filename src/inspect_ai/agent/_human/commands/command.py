@@ -1,6 +1,6 @@
 import abc
 from argparse import Namespace
-from typing import Any, Awaitable, Callable, Literal, NamedTuple
+from typing import Any, Awaitable, Callable, Literal, NamedTuple, TypeAlias
 
 from pydantic import JsonValue
 
@@ -8,6 +8,8 @@ from ..state import HumanAgentState
 
 
 class HumanAgentCommand:
+    """A command available through the human CLI agent's `task` executable."""
+
     @property
     @abc.abstractmethod
     def name(self) -> str:
@@ -57,3 +59,8 @@ class HumanAgentCommand:
 
 def call_human_agent(method: str, **params: Any) -> Any:
     return None
+
+
+HumanAgentCommandsFilter: TypeAlias = Callable[
+    [list[HumanAgentCommand]], list[HumanAgentCommand]
+]

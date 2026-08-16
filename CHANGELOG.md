@@ -1,6 +1,23 @@
 ## Unreleased
 
-- Anthropic: A client-supplied `fallbacks` directive is now forwarded to the API verbatim instead of being dropped (skipped on bedrock/vertex/azure, which reject the field).
+- Anthropic: A client-supplied `fallbacks` directive is now forwarded to the API verbatim instead of being dropped.
+- Agent Bridge: Side calls to a different model can no longer displace the tracked agent conversation.
+- MCP: A shared `ToolSource` no longer serves one sample's tools to another; cached tools are re-resolved when the async scope changes.
+- Agent Bridge: Image tool results now reach sandboxed agents as MCP image content instead of being flattened to text.
+- Agent Bridge: Bridged Anthropic requests now preserve `system` block boundaries.
+- Agent Bridge: Client-supplied HTTP headers are forwarded through the sandbox proxy to bridged model requests.
+- Agent Bridge: Bridged client `reasoning` options now reach the model request verbatim when generation config is forwarded.
+- Human Agent: `human_cli()` now accepts a `commands_filter` option for tailoring available commands.
+- Agent Bridge: `agent_bridge()` and `sandbox_agent_bridge()` now accept a `response_filter` for transforming model output.
+- Agent Bridge: Provider-specific endpoints qualify bare model names before resolving them.
+- Agent Bridge: A bridged client naming the eval model's concrete id now resolves to the eval's own `Model` instance.
+- Agent Bridge: `sandbox_agent_bridge()` can preserve every conversation a sandbox runs.
+- Bugfix: A sandbox that becomes unreachable during `exec_remote()` now reports why instead of a bare `RetryError`.
+- MCP: a sandboxed MCP server is now started once per sample instead of once per tool call, so an eval with many concurrent samples no longer spends most of its time on server startup and handshakes.
+- Task: added `sample_resources`, async context managers held open for a whole sample (entered once its sandbox exists, exited after scoring) — use it to pay for a per-sample connection or process once rather than per solver.
+- Eval: added opt-in `INSPECT_GC_MODE=low_latency` to suppress automatic full collections during high-concurrency runs while retaining a cgroup-memory guard.
+- Google: Reuse one SSL context across model clients instead of rebuilding it per request, removing blocking CA-bundle reads that could stall evals at high sandbox concurrency.
+- Google: bridged agent calls no longer rebuild the SSL context on every model call, which was blocking the event loop under high sandbox concurrency.
 - ACP: Emit an `inspect/turn_state` extension notification (`started` / `ended` / `cancelled`) from the agent turn boundary so ACP clients have an exact "agent working" signal.
 - Inspect CTL: Terminal escape sequences and control characters in agent-generated text are now sanitized in `inspect ctl` human-readable output, preventing spoofing of the operator's terminal.
 - Fixed sandbox tools (`text_editor`, `bash_session`) failing to install in non-root sandboxes (e.g. Kubernetes pods with `runAsNonRoot`).
