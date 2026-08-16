@@ -1,6 +1,18 @@
 ## Unreleased
 
-- Anthropic: A client-supplied `fallbacks` directive is now forwarded to the API verbatim instead of being dropped (skipped on bedrock/vertex/azure, which reject the field).
+- Anthropic: A client-supplied `fallbacks` directive is now forwarded to the API verbatim instead of being dropped.
+- Agent Bridge: Side calls to a different model can no longer displace the tracked agent conversation.
+- MCP: A shared `ToolSource` no longer serves one sample's tools to another; cached tools are re-resolved when the async scope changes.
+- Agent Bridge: Image tool results now reach sandboxed agents as MCP image content instead of being flattened to text.
+- Agent Bridge: Bridged Anthropic requests now preserve `system` block boundaries.
+- Agent Bridge: Client-supplied HTTP headers are forwarded through the sandbox proxy to bridged model requests.
+- Agent Bridge: Bridged client `reasoning` options now reach the model request verbatim when generation config is forwarded.
+- Human Agent: `human_cli()` now accepts a `commands_filter` option for tailoring available commands.
+- Agent Bridge: `agent_bridge()` and `sandbox_agent_bridge()` now accept a `response_filter` for transforming model output.
+- Agent Bridge: Provider-specific endpoints qualify bare model names before resolving them.
+- Agent Bridge: A bridged client naming the eval model's concrete id now resolves to the eval's own `Model` instance.
+- Agent Bridge: `sandbox_agent_bridge()` can preserve every conversation a sandbox runs.
+- Bugfix: A sandbox that becomes unreachable during `exec_remote()` now reports why instead of a bare `RetryError`.
 - Scoring: New `precomputed_scores()` scorer applies scores computed outside of Inspect (e.g. human ratings) from a JSON or JSON Lines file, matched to samples by id and epoch.
 - Bugfix: `file_dataset()` now recognizes JSON and CSV URLs with query parameters while preserving the complete URL passed to the selected dataset reader.
 - Scoring: `model_graded_qa`/`model_graded_fact` now leave a sample unscored when the default grader's final `GRADE:` verdict is a letter the instructions never offered, instead of scoring a grade mentioned earlier in its reasoning. Note: re-scoring existing logs may shift metrics and sample counts — samples whose grader verdict was off-menu (including `P` grades when `partial_credit` is disabled) were previously scored from an earlier on-menu mention and are now unscored with `grade_parse_failure` recorded.
