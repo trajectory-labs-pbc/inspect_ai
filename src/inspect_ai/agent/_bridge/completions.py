@@ -12,6 +12,7 @@ from inspect_ai.model._generate_config import (
     GenerateConfig,
     ResponseSchema,
 )
+from inspect_ai.model._model import ModelName
 from inspect_ai.model._openai_convert import messages_from_openai
 from inspect_ai.model._providers.providers import validate_openai_client
 from inspect_ai.tool._tool_choice import ToolChoice, ToolFunction
@@ -57,13 +58,19 @@ async def inspect_completions_api_request(
     )
 
     bridge_model_name = str(json_data["model"])
-    model = resolve_inspect_model(bridge_model_name, bridge.model_aliases, bridge.model)
+    model = resolve_inspect_model(
+        bridge_model_name,
+        bridge.model_aliases,
+        bridge.model,
+        model_resolver=bridge.model_resolver,
+        provider="openai",
+    )
     model_name = model.api.model_name
 
     # convert openai messages to inspect messages
     openai_messages: list[ChatCompletionMessageParam] = json_data["messages"]
     messages = await messages_from_openai(openai_messages, model_name)
-    validate_bridge_media(bridge, messages)
+    await validate_bridge_media(bridge, messages)
 
     # extract generate config (hoist instructions into system_message)
     config = generate_config_from_openai_completions(json_data)
@@ -96,7 +103,7 @@ async def inspect_completions_api_request(
         messages.append(c_message)
 
     # update state if we have more messages than the last generation
-    await bridge._track_state(messages, output)
+    await bridge._track_state(messages, output, str(ModelName(model)))
 
     # inspect completion to openai completion
     return ChatCompletion(
