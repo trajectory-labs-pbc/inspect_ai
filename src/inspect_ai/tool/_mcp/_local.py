@@ -1,11 +1,14 @@
+import asyncio
 import contextlib
 import os
 import sys
+import weakref
 from contextlib import AsyncExitStack
 from logging import getLogger
 from pathlib import Path
 from types import TracebackType
 from typing import Any, AsyncIterator, Callable
+from weakref import WeakKeyDictionary
 
 import anyio
 from mcp.client.session import ClientSession, SamplingFnT
@@ -23,6 +26,7 @@ from mcp.types import (
 from mcp.types import Tool as MCPTool
 from typing_extensions import override
 
+from inspect_ai._util._async import current_async_backend
 from inspect_ai._util._json_rpc import (
     JSONRPCErrorMapper,
     JSONRPCParamsType,
@@ -86,6 +90,27 @@ class _McpErrorMapper(JSONRPCErrorMapper):
         return ToolError(message)
 
 
+def _current_task() -> object:
+    """The running task object, for use as a weak registry key.
+
+    anyio's `get_current_task()` returns a fresh `TaskInfo` per call whose hash
+    derives from `id()`, making it neither a stable nor a weak key. The backend
+    task objects are weak-referenceable and hashed by identity.
+    """
+    backend = current_async_backend()
+    if backend == "trio":
+        import trio.lowlevel
+
+        return trio.lowlevel.current_task()
+    elif backend == "asyncio":
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("MCP servers require a running asyncio task.")
+        return task
+    else:
+        raise RuntimeError("MCP servers require a running async event loop.")
+
+
 class MCPServerLocal(MCPServer):
     def __init__(
         self,
@@ -100,12 +125,21 @@ class MCPServerLocal(MCPServer):
         self._name = name
         self._events = events
         self._timeout = timeout
-        # Per-instance session table keyed by scope (see _session_scope): the
-        # running sample attempt when there is one, else the current anyio
-        # task. Storing it on the instance (rather than the class) means a
-        # recycled task id in the fallback path can't leak one sample's cached
-        # session — including its cached tool list — into another sample.
-        self._task_sessions: dict[object, "MCPServerLocalSession"] = {}
+        # One MCP session per session scope (see _session_scope), keyed by
+        # the scope OBJECT so entries can be weakly referenced and die with
+        # their scope. Per-instance (not per-class or per-name) so distinct
+        # MCPServerLocal instances never share a session even when
+        # constructed with the same `name`. The task-object fallback
+        # specifically avoids anyio.get_current_task().id: that's a plain
+        # int, not weak-referenceable, so a WeakKeyDictionary keyed on it
+        # would keep every fallback entry alive forever. Keying by id would
+        # also be stale and unbounded: TaskInfo.id is id()-derived, so an id
+        # is reusable once its task is collected, and a session created but
+        # never entered (a plain solver eval only calls tools()) would
+        # otherwise never be evicted.
+        self._task_sessions: "WeakKeyDictionary[object, MCPServerLocalSession]" = (
+            WeakKeyDictionary()
+        )
 
     @override
     async def __aenter__(self) -> MCPServer:
@@ -127,59 +161,60 @@ class MCPServerLocal(MCPServer):
     def _session_scope(self) -> object:
         """Identity that owns one server process.
 
-        The running **sample attempt** (``ActiveSample``), when there is one.
-        A stdio MCP server is a process inside that sample's sandbox, so the
-        sample attempt is its natural lifetime — and it is the isolation
-        boundary that matters: distinct attempts (concurrent epochs, retries)
-        get distinct objects, so tools can never bind across samples.
+        The running **sample attempt** (``ActiveSample``), when there is one
+        and still in progress. A stdio MCP server is a process inside that
+        sample's sandbox, so the sample attempt is its natural lifetime --
+        and it is the isolation boundary that matters: distinct attempts
+        (concurrent epochs, retries) get distinct objects, so tools can
+        never bind across samples.
 
-        Keying on the current anyio task instead made every task that touched
-        the tool source miss the table and launch another server: the agent
-        bridge serves each tool call from its own task, so one sample paid the
-        exec+import+handshake cost 8-9 times (measured in-sandbox), which is a
-        large share of the event-loop starvation seen at hundreds of concurrent
-        sandboxes. Bridge request tasks descend from the sample's task group,
-        so they observe the same ActiveSample and now share its session.
+        Keying on the current task instead made every task that touched the
+        tool source miss the table and launch another server: the agent
+        bridge serves each tool call from its own task, so one sample paid
+        the exec+import+handshake cost 8-9 times (measured in-sandbox),
+        which is a large share of the event-loop starvation seen at
+        hundreds of concurrent sandboxes. Bridge request tasks descend from
+        the sample's task group, so they observe the same ActiveSample and
+        now share its session.
 
-        A *completed* ActiveSample is not a valid scope: a child task that
-        outlives its sample must not resurrect a server in a torn-down sandbox.
-        Such a task falls back to task scope and fails against a closed
-        session, which is the intended loud failure.
+        A *completed* ActiveSample is not a valid scope: the check below
+        rejects it, so a child task that outlives its sample falls back to
+        the task scope instead. That fallback misses the table -- nothing
+        was ever registered under that task -- so it launches a fresh
+        server into the sample's already-torn-down sandbox, which fails
+        loudly at exec rather than silently reusing a closed session.
 
         Outside a sample (bare ``mcp_connection`` in tests or tooling) the
-        current anyio task is the scope, preserving the previous behaviour.
+        current async task is the scope, preserving the previous behaviour.
         """
         from inspect_ai.log._samples import sample_active
 
         active = sample_active()
         if active is not None and active.completed is None:
             return active
-        return anyio.get_current_task().id
+        return _current_task()
 
     def _task_session(self) -> "MCPServerLocalSession":
-        session_key = (self._session_scope(), self._name)
-        session = self._task_sessions.get(session_key)
+        scope = self._session_scope()
+        session = self._task_sessions.get(scope)
         if session is None:
             session = MCPServerLocalSession(
                 self._client,
                 name=self._name,
                 events=self._events,
                 timeout=self._timeout,
-                cache_key=session_key,
-                task_sessions=self._task_sessions,
+                registry=self._task_sessions,
+                scope=scope,
                 owner=self,
             )
-            self._task_sessions[session_key] = session
+            self._task_sessions[scope] = session
         return session
 
     def _tool_cache_scope(self) -> object:
-        # Cache token for MCPToolSourceLocal: the per-task session OBJECT.
-        # anyio's TaskInfo.id is id()-based on asyncio and can be reused once
-        # an earlier task is garbage collected, so a raw task id is not unique
-        # over time. Sessions evict themselves from _task_sessions when they
-        # close, so a reused task id yields a fresh session object and the
-        # tool source re-resolves rather than serving tools bound to a dead
-        # session.
+        # Cache token for MCPToolSourceLocal: the per-scope session OBJECT. A
+        # new scope (sample attempt, or fallback task) gets a new session,
+        # and a session evicts itself when it closes, so the token changes
+        # exactly when tools bound to the previous session stop being valid.
         return self._task_session()
 
 
@@ -191,8 +226,8 @@ class MCPServerLocalSession(MCPServer):
         name: str,
         events: bool,
         timeout: int | None = None,
-        cache_key: object | None = None,
-        task_sessions: dict[object, "MCPServerLocalSession"] | None = None,
+        registry: "WeakKeyDictionary[object, MCPServerLocalSession] | None" = None,
+        scope: object | None = None,
         owner: "MCPServerLocal | None" = None,
     ) -> None:
         super().__init__()
@@ -201,11 +236,22 @@ class MCPServerLocalSession(MCPServer):
         self._name = name
         self._events = events
         self._timeout = timeout
-        self._cache_key = cache_key
-        self._task_sessions = task_sessions
-        # The MCPServerLocal that created this session, used to re-resolve the
-        # CURRENT session when a tool closure outlives the one that made it
-        # (see _client_session).
+        # weak, because the registry (the owner's self._task_sessions) is
+        # owned by the MCPServerLocal instance, not by this session: a
+        # strong reference back would make the two a cycle that only the
+        # collector can free, delaying the release this keying exists to
+        # guarantee
+        self._registry = weakref.ref(registry) if registry is not None else None
+        # weak too: `scope` is the same object used as this session's key
+        # in `_registry` (a WeakKeyDictionary). A strong reference here
+        # would keep that key alive via the session, which the dict itself
+        # only holds alive via the key -- deadlocking the exact eviction
+        # this keying exists to guarantee. Needed at close time since a
+        # WeakKeyDictionary can't be searched by value.
+        self._scope = weakref.ref(scope) if scope is not None else None
+        # The MCPServerLocal that created this session, used to re-resolve
+        # the CURRENT session when a tool closure outlives the one that made
+        # it (see _client_session).
         self._owner = owner
         self._session: ClientSession | None = None
         self._exit_stack: AsyncExitStack | None = None
@@ -239,8 +285,8 @@ class MCPServerLocalSession(MCPServer):
                     await self._session.initialize()
                 self._refcount = 1
             except BaseException:
-                # a partially-created session must not stay registered under
-                # the task id: a later task reusing the id would adopt it
+                # a half-built session must not stay registered: a later
+                # tools() call in this scope would adopt it
                 await self._close_and_evict()
                 raise
 
@@ -262,12 +308,11 @@ class MCPServerLocalSession(MCPServer):
                 await self._close_and_evict()
 
     async def _close_and_evict(self) -> None:
-        # Close the session and drop it from the per-task registry. Eviction
-        # matters because task ids can be reused after a task is collected
-        # (id()-based on asyncio): without it, a later task landing on a
-        # reused id would find this closed session and its stale cached tool
-        # list. The identity check guards against evicting a replacement
-        # registered under the same key.
+        # Close the session and drop it from its scope's registry, so a
+        # later tools() call in the same scope builds a fresh session rather
+        # than reusing this closed one and its stale cached tool list. The
+        # identity check leaves a replacement registered under the same
+        # scope in place.
         try:
             if self._exit_stack is not None:
                 await self._exit_stack.aclose()
@@ -275,12 +320,14 @@ class MCPServerLocalSession(MCPServer):
             self._session = None
             self._exit_stack = None
             self._cached_tool_list = None
+            registry = self._registry() if self._registry is not None else None
+            scope = self._scope() if self._scope is not None else None
             if (
-                self._task_sessions is not None
-                and self._cache_key is not None
-                and self._task_sessions.get(self._cache_key) is self
+                registry is not None
+                and scope is not None
+                and registry.get(scope) is self
             ):
-                del self._task_sessions[self._cache_key]
+                del registry[scope]
 
     @override
     async def tools(self) -> list[Tool]:
@@ -389,20 +436,20 @@ class MCPServerLocalSession(MCPServer):
             yield self._session
             return
 
-        # A tool closure outlives the session that produced it: `tools()` binds
-        # each Tool to `self`, and callers hold those closures well past the
-        # connection that resolved them -- the sandbox agent bridge registers
-        # them once and then invokes them per request. Falling straight through
-        # to a private client here started a whole MCP server process per tool
-        # call, bypassing the session table entirely (measured in-sandbox: five
-        # server launches for four tool calls, none of them exiting until the
-        # call returned).
+        # A tool closure outlives the session that produced it: `tools()`
+        # binds each Tool to `self`, and callers hold those closures well
+        # past the connection that resolved them -- the sandbox agent bridge
+        # registers them once and then invokes them per request. Falling
+        # straight through to a private client here started a whole MCP
+        # server process per tool call, bypassing the session table
+        # entirely (measured in-sandbox: five server launches for four tool
+        # calls, none of them exiting until the call returned).
         #
-        # Re-resolve through the owner instead, which returns the session for
-        # the CURRENT scope -- the live one for this sample when there is one.
-        # Only when that also has no connection do we fall back to a private
-        # client, which keeps a call arriving after its sample has finished
-        # (e.g. trailing scoring) working rather than raising.
+        # Re-resolve through the owner instead, which returns the session
+        # for the CURRENT scope -- the live one for this sample when there
+        # is one. Only when that also has no connection do we fall back to
+        # a private client, which keeps a call arriving after its sample
+        # has finished (e.g. trailing scoring) working rather than raising.
         adopted = self._current_scope_session()
         if adopted is not None:
             yield adopted
