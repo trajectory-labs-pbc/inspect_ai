@@ -86,6 +86,12 @@ class LogOverview(BaseModel):
 
     primary_metric: EvalMetric | None = Field(default=None)
 
+    metadata: dict[str, Any] | None = Field(default=None)
+    """Eval metadata (eval-time values plus any post-hoc edits).
+
+    Carried in the listing so a log-list column can render author-supplied
+    metadata without fetching every log's header."""
+
 
 def list_eval_logs(
     log_dir: str = os.environ.get("INSPECT_LOG_DIR", "./logs"),
@@ -1078,6 +1084,10 @@ def to_overview(header: EvalLog) -> LogOverview:
         started_at=header.stats.started_at,
         completed_at=header.stats.completed_at,
         primary_metric=primary_metric,
+        # `header.metadata`, not `header.eval.metadata`: the former folds in
+        # post-hoc edit_eval_log() edits, so a corrected value reaches the
+        # listing instead of the stale eval-time one.
+        metadata=header.metadata or None,
     )
 
 
