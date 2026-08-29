@@ -1,8 +1,7 @@
 ## Unreleased
 
 - Eval: added opt-in `INSPECT_GC_MODE=low_latency` to suppress automatic full collections during high-concurrency runs while retaining a cgroup-memory guard.
-- Google: Reuse one SSL context across model clients instead of rebuilding it per request, removing blocking CA-bundle reads that could stall evals at high sandbox concurrency.
-- Google: bridged agent calls no longer rebuild the SSL context on every model call, which was blocking the event loop under high sandbox concurrency.
+- Google/Gemini: Faster client setup under high sandbox concurrency, with custom CA bundles now preserved on both sync and async requests.
 - MCP: a sandboxed MCP server is now started once per sample instead of once per tool call, so an eval with many concurrent samples no longer spends most of its time on server startup and handshakes.
 - Task: added `sample_resources`, async context managers held open for a whole sample (entered once its sandbox exists, exited after scoring) — use it to pay for a per-sample connection or process once rather than per solver.
 - ACP: Emit an `inspect/turn_state` extension notification (`started` / `ended` / `cancelled`) from the agent turn boundary so ACP clients have an exact "agent working" signal.
