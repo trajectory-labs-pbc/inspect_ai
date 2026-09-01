@@ -11,7 +11,7 @@ import pytest
 from test_helpers.utils import skip_if_no_docker
 
 from inspect_ai import Task, eval
-from inspect_ai.agent._human.agent import human_cli
+from inspect_ai.agent import HumanAgentCommand, HumanAgentCommandsFilter, human_cli
 from inspect_ai.agent._human.commands import submit
 from inspect_ai.agent._human.commands.submit import QuitCommand, SubmitCommand
 
@@ -44,6 +44,27 @@ def test_session_end_commands_decline_on_eof(
     command.cli(args)
 
     assert calls == expected_calls
+
+
+class _AdditionalCommand(HumanAgentCommand):
+    @property
+    def name(self) -> str:
+        return "additional"
+
+    @property
+    def description(self) -> str:
+        return "Additional test command."
+
+
+def test_human_cli_accepts_public_commands_filter():
+    def commands_filter(
+        commands: list[HumanAgentCommand],
+    ) -> list[HumanAgentCommand]:
+        return [*commands, _AdditionalCommand()]
+
+    filter_: HumanAgentCommandsFilter = commands_filter
+
+    assert callable(human_cli(commands_filter=filter_))
 
 
 @pytest.mark.slow
