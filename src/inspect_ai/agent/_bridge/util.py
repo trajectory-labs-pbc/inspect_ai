@@ -26,7 +26,7 @@ from inspect_ai.agent._bridge._approval import (
     apply_bridge_tool_approval,
     terminate_for_repeated_rejections,
 )
-from inspect_ai.agent._bridge._errors import BridgePolicyError
+from inspect_ai.agent._bridge._errors import BridgePolicyError, ResponseFilterError
 from inspect_ai.agent._bridge.types import AgentBridge, message_json_hash
 from inspect_ai.model._agent_message import validate_agent_message
 from inspect_ai.model._chat_message import ChatMessage, ChatMessageUser
@@ -41,6 +41,7 @@ from inspect_ai.model._model import (
     Model,
     ModelGenerateFilter,
     ModelName,
+    ModelResolver,
     active_model,
     get_model,
     model_roles,
@@ -526,10 +527,42 @@ async def bridge_generate(
                     config=config,
                 )
 
-        # Update the compaction baseline with the actual input token
-        # count from the generate call (most accurate source of truth)
+        # Update the compaction baseline with the actual input token count
+        # from the generate call (most accurate source of truth). This must
+        # happen before the response filter runs: a replacing filter changes
+        # what the scaffold sees, not what the call actually consumed, and a
+        # synthetic replacement (e.g. `ModelOutput.from_content()`) carries no
+        # usage at all, which would silently stall calibration on the
+        # count_tokens estimate for the rest of the run.
         if compact is not None:
             await compact.record_output(input_messages, output)
+
+        # Apply response filter if configured.
+        # Runs inside the refusal-retry loop so a filter that returns a
+        # content_filter ModelOutput triggers a retry; the input arguments
+        # passed are the same ones sent to model.generate() (post-request-filter
+        # mutation if applicable). A response_filter is eval logic, not a
+        # passive observer, so a failure in it fails the sample (attributed
+        # to the filter) instead of being reported to the scaffold as a
+        # model/provider error; see `ResponseFilterError`.
+        if bridge.response_filter is not None:
+            tool_info_for_response = [
+                tool_to_tool_info(tool) if not isinstance(tool, ToolInfo) else tool
+                for tool in tools
+            ]
+            try:
+                filtered = await bridge.response_filter(
+                    model,
+                    output,
+                    input_messages,
+                    tool_info_for_response,
+                    tool_choice,
+                    config,
+                )
+            except Exception as ex:
+                raise ResponseFilterError(str(ex)) from ex
+            if filtered is not None:
+                output = filtered
 
         # Check for refusal and retry if needed
         if (
@@ -579,13 +612,44 @@ def resolve_inspect_model(
     model_name: str,
     model_aliases: dict[str, str | Model] | None = None,
     fallback_model: str | None = None,
+    *,
+    model_resolver: ModelResolver | None = None,
+    provider: str = "",
 ) -> Model:
     if model_aliases and model_name in model_aliases:
         return get_model(model_aliases[model_name])
 
+    # The client's original request, before provider qualification below widens a
+    # bare name (e.g. "gpt-4o" -> "openai/gpt-4o"). Kept so the active-model match
+    # at the end can still recognize a bare name that matches the active model's
+    # short name even after qualification changes `model_name`.
+    raw_model_name = model_name
+
+    # A bare model name on a provider-specific bridge endpoint resolves to that provider (the
+    # endpoint implies it); otherwise get_model rejects the unqualified name.
+    if (
+        provider
+        and "/" not in model_name
+        and model_name != "inspect"
+        and model_name not in model_roles()
+    ):
+        model_name = f"{provider}/{model_name}"
+
+    # Dynamic routing policy: checked after explicit aliases, before the static
+    # fallback. Returning None defers to the fallback / normal resolution below.
+    if model_resolver is not None:
+        resolved = model_resolver(model_name)
+        if resolved is not None:
+            return resolved if isinstance(resolved, Model) else get_model(resolved)
+
+    # An explicitly configured fallback overrides whatever the client asked for; it
+    # must win over the active-model match below rather than be silently shadowed
+    # by a bare name that happens to match the active model's short name.
+    fallback_applied = False
     if fallback_model is not None:
         if model_name != "inspect" or not fallback_model.startswith("inspect/"):
             model_name = fallback_model
+            fallback_applied = True
 
     if model_name == "inspect":
         return get_model()
@@ -604,10 +668,20 @@ def resolve_inspect_model(
     # options were silently dropped before the provider request. Returning the active
     # instance also avoids a second Model (and its connection pool) for one model.
     #
+    # A bare name is also matched against the raw pre-qualification request:
+    # provider qualification above widens e.g. "gpt-4o" to "openai/gpt-4o", which no
+    # longer matches an active model on a different provider (e.g. "azureai/gpt-4o")
+    # even though the client meant the eval's own model. That raw-name match is
+    # skipped once an explicit fallback has applied -- the fallback override must
+    # win, not be silently shadowed by this heuristic.
+    #
     # Deliberately placed last: aliases, an explicit "inspect", and model roles all
     # return above, so this cannot redirect a role or alias to the eval's model.
     active = active_model()
-    if active is not None and model_name in (str(active), ModelName(active).name):
+    if active is not None and (
+        model_name in (str(active), ModelName(active).name)
+        or (not fallback_applied and raw_model_name == ModelName(active).name)
+    ):
         return active
 
     return get_model(model_name)
