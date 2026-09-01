@@ -379,3 +379,34 @@ def test_pypi_wheel_contents_gate(pypi_release: ModuleType, tmp_path: Path) -> N
             wheel.writestr(member, "content")
     with pytest.raises(RuntimeError, match="SHA256SUMS"):
         pypi_release.verify_wheel_contents(incomplete, "9")
+
+
+# ---------------------------------------------------------------------------
+# Fork-specific: the default bucket URL must be a real distribution point
+# ---------------------------------------------------------------------------
+
+
+async def test_default_url_attempts_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-tree default URL is a REAL distribution point and must be tried.
+
+    (A previous revision short-circuited on the default when it was a
+    placeholder; that guard must never come back now that the default works.)
+    """
+    filename = "inspect-sandbox-tools-amd64-v999"
+    requested: list[str] = []
+
+    assert sandbox_module._BUCKET_BASE_URL == sandbox_module._DEFAULT_BUCKET_BASE_URL
+    monkeypatch.setattr(sandbox_module, "_binaries_dir", lambda: tmp_path)
+    monkeypatch.setattr(sandbox_module, "lookup_digest", lambda name: "0" * 64)
+
+    def _record_and_404(method: str, url: str, **kwargs: object) -> _FakeStream:
+        requested.append(url)
+        return _FakeStream(404, b"")
+
+    stream_mock = MagicMock(side_effect=_record_and_404)
+    with patch("inspect_ai._util.download.httpx.stream", stream_mock):
+        assert await sandbox_module._download_from_s3(filename) is False
+
+    assert requested == [f"{sandbox_module._DEFAULT_BUCKET_BASE_URL}/{filename}"]
