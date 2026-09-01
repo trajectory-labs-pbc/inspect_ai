@@ -221,6 +221,11 @@
       "undescribed": 1
     }
   },
+  "src/inspect_ai/_util/event_loop_monitor.py": {
+    "pyright: ignore[reportPrivateUsage]": {
+      "count": 1
+    }
+  },
   "src/inspect_ai/_util/file.py": {
     "type: ignore": {
       "count": 4,
@@ -876,6 +881,14 @@
       "undescribed": 1
     }
   },
+  "src/inspect_ai/model/_providers/util/hidden_states.py": {
+    "type: ignore[import-not-found]": {
+      "count": 1
+    },
+    "type: ignore[unused-ignore]": {
+      "count": 1
+    }
+  },
   "src/inspect_ai/model/_providers/util/hooks.py": {
     "type: ignore[assignment]": {
       "count": 1,
@@ -1508,6 +1521,11 @@
       "undescribed": 4
     }
   },
+  "tests/agent/test_bridge_headers.py": {
+    "type: ignore[import-untyped]": {
+      "count": 1
+    }
+  },
   "tests/agent/test_bridge_raw_response.py": {
     "type: ignore[arg-type]": {
       "count": 4,
@@ -1891,6 +1909,11 @@
       "undescribed": 4
     }
   },
+  "tests/test_task_sample_resources.py": {
+    "type: ignore[arg-type]": {
+      "count": 2
+    }
+  },
   "tests/tools/test_call_tools.py": {
     "type: ignore[assignment]": {
       "count": 1,
@@ -1911,6 +1934,14 @@
     "noqa:E402": {
       "count": 4,
       "undescribed": 4
+    }
+  },
+  "tests/tools/test_mcp_session_isolation.py": {
+    "pyright: ignore[reportArgumentType]": {
+      "count": 1
+    },
+    "type: ignore[arg-type]": {
+      "count": 1
     }
   },
   "tests/tools/test_mcp_stdio_stderr.py": {
