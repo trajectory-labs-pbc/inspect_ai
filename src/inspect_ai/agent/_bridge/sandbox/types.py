@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, Sequence
 
 import anyio
 
@@ -38,6 +38,7 @@ class SandboxAgentBridge(AgentBridge):
         checkpointer: Checkpointer | None = None,
         allow_remote_mcp: bool = False,
         allow_remote_media: bool = False,
+        model_event_metadata_headers: Sequence[str] | None = None,
     ) -> None:
         super().__init__(
             state,
@@ -52,6 +53,7 @@ class SandboxAgentBridge(AgentBridge):
             checkpointer=checkpointer,
             allow_remote_mcp=allow_remote_mcp,
             allow_remote_media=allow_remote_media,
+            model_event_metadata_headers=model_event_metadata_headers,
         )
         self.port = port
         self.mcp_server_configs = mcp_server_configs or []
