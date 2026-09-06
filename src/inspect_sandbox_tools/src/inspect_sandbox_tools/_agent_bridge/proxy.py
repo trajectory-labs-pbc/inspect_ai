@@ -53,6 +53,7 @@ _SENSITIVE_MODEL_EVENT_METADATA_HEADER_PARTS = (
     "key",
     "secret",
     "token",
+    "password",
 )
 
 _HTTP_HEADER_TOKEN_CHARACTERS = frozenset("!#$%&'*+-.^_`|~")
@@ -749,7 +750,7 @@ async def model_proxy_server(
     async def responses(request: dict[str, Any]) -> dict[str, Any]:
         try:
             json_body = _json_body(request)
-            headers = _request_metadata_headers(request)
+            metadata_headers = _request_metadata_headers(request)
             if not _has_model(json_body):
                 return _openai_missing_param("model")
             if json_body.get("input") is None:
@@ -757,7 +758,9 @@ async def model_proxy_server(
             stream = json_body.get("stream", False)
 
             completion = await call_bridge_model_service_async(
-                "generate_responses", json_data=json_body, headers=headers
+                "generate_responses",
+                json_data=json_body,
+                metadata_headers=metadata_headers,
             )
 
             error = _provider_error(completion)
@@ -1476,7 +1479,7 @@ async def model_proxy_server(
     async def chat_completions(request: dict[str, Any]) -> dict[str, Any]:
         try:
             json_body = _json_body(request)
-            headers = _request_metadata_headers(request)
+            metadata_headers = _request_metadata_headers(request)
             if not _has_model(json_body):
                 return _openai_missing_param("model")
             if json_body.get("messages") is None:
@@ -1491,7 +1494,9 @@ async def model_proxy_server(
             json_body["parallel_tool_calls"] = False
 
             completion = await call_bridge_model_service_async(
-                "generate_completions", json_data=json_body, headers=headers
+                "generate_completions",
+                json_data=json_body,
+                metadata_headers=metadata_headers,
             )
 
             error = _provider_error(completion)
@@ -1699,7 +1704,7 @@ async def model_proxy_server(
     async def anthropic(request: dict[str, Any]) -> dict[str, Any]:
         try:
             json_body = _json_body(request)
-            headers = _request_metadata_headers(request)
+            metadata_headers = _request_metadata_headers(request)
             if not _has_model(json_body):
                 return _anthropic_missing_param("model")
             if json_body.get("messages") is None:
@@ -1741,7 +1746,9 @@ async def model_proxy_server(
                     PING_INTERVAL_S = 5.0
                     task = asyncio.create_task(
                         call_bridge_model_service_async(
-                            "generate_anthropic", json_data=json_body, headers=headers
+                            "generate_anthropic",
+                            json_data=json_body,
+                            metadata_headers=metadata_headers,
                         )
                     )
                     try:
@@ -2056,7 +2063,9 @@ async def model_proxy_server(
                 }
             else:
                 completion = await call_bridge_model_service_async(
-                    "generate_anthropic", json_data=json_body, headers=headers
+                    "generate_anthropic",
+                    json_data=json_body,
+                    metadata_headers=metadata_headers,
                 )
                 error = _provider_error(completion)
                 if error is not None:
@@ -2092,7 +2101,7 @@ async def model_proxy_server(
         try:
             path = request.get("path", "")
             json_body = _json_body(request)
-            headers = _request_metadata_headers(request)
+            metadata_headers = _request_metadata_headers(request)
 
             is_streaming = ":streamGenerateContent" in path
 
@@ -2102,7 +2111,9 @@ async def model_proxy_server(
             json_body["model"] = model_name
 
             completion = await call_bridge_model_service_async(
-                "generate_google", json_data=json_body, headers=headers
+                "generate_google",
+                json_data=json_body,
+                metadata_headers=metadata_headers,
             )
 
             error = _provider_error(completion)
