@@ -44,6 +44,17 @@ REGULAR_FILE = ExecResult(
 )
 """Helper result for the detector: verified, and the launcher is a regular file."""
 
+FORK_VERSION = ExecResult(
+    success=True,
+    returncode=0,
+    stdout=(
+        '{"jsonrpc":"2.0","result":'
+        f'"1.2.1+tl.{sandbox_tools._get_sandbox_tools_fork_revision()}","id":1}}'
+    ),
+    stderr="",
+)
+"""Launcher's answer to the version query: a build matching this checkout's fork revision."""
+
 
 def violation(message: str) -> ExecResult[str]:
     return ExecResult(
@@ -107,9 +118,16 @@ def helper_flags(cmd: list[str]) -> HelperFlags:
     return HelperFlags(*cmd[cmd.index(leaf) - 4 : cmd.index(leaf) - 1])
 
 
+def is_version_query(cmd: list[str]) -> bool:
+    """Whether ``cmd`` is the post-launch version query injection sends to the launcher."""
+    return cmd == [SANDBOX_CLI, "exec"]
+
+
 def helper_ok(cmd: list[str], user: str | None) -> ExecResult[str]:
-    """Every helper call verifies; every other command succeeds."""
-    return VERIFIED if is_framework_dir_call(cmd) else OK
+    """Every helper call verifies; the version query matches; every other command succeeds."""
+    if is_framework_dir_call(cmd):
+        return VERIFIED
+    return FORK_VERSION if is_version_query(cmd) else OK
 
 
 @pytest.fixture
@@ -173,7 +191,7 @@ async def test_detector_skips_root_probe_after_rootless_injection(
     def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
         if user == "root":
             raise RuntimeError("runuser: may not be used by non-root users")
-        return REGULAR_FILE if is_framework_dir_call(cmd) else OK
+        return REGULAR_FILE if is_framework_dir_call(cmd) else helper_ok(cmd, user)
 
     sandbox = CannedSandbox(policy)
     await sandbox_tools._inject_container_tools_code(sandbox)
