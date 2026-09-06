@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import IntEnum
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, NoReturn, Sequence, Set
@@ -17,7 +18,13 @@ from inspect_ai.model._compaction import (
 from inspect_ai.model._compaction import (
     compaction as create_compaction,
 )
-from inspect_ai.model._model import GenerateFilter, Model, ModelEventSink
+from inspect_ai.model._model import (
+    GenerateFilter,
+    Model,
+    ModelEventSink,
+    ModelResolver,
+    ModelResponseFilter,
+)
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.tool._tool import Tool
 from inspect_ai.tool._tool_call import ToolCall
@@ -31,6 +38,55 @@ if TYPE_CHECKING:
     # cycles back through partially-initialized modules). Same reason
     # `model/_call_tools.py` defers it.
     from inspect_ai.approval._policy import ApprovalPolicy
+
+
+_SENSITIVE_MODEL_EVENT_METADATA_HEADER_PARTS = (
+    "authorization",
+    "cookie",
+    "credential",
+    "key",
+    "secret",
+    "token",
+    "password",
+)
+
+_HTTP_HEADER_TOKEN_CHARACTERS = frozenset("!#$%&'*+-.^_`|~")
+
+
+def _is_valid_http_header_name(name: str) -> bool:
+    """Return whether ``name`` has the RFC 9110 HTTP field-name token syntax."""
+    return name.isascii() and all(
+        character.isalnum() or character in _HTTP_HEADER_TOKEN_CHARACTERS
+        for character in name
+    )
+
+
+def _normalize_model_event_metadata_headers(
+    headers: Sequence[str] | None,
+) -> frozenset[str]:
+    """Validate and normalize headers that may enter `ModelEvent` metadata."""
+    if headers is None:
+        return frozenset()
+    if isinstance(headers, str):
+        raise ValueError("model event metadata headers must be a sequence of names")
+
+    normalized: set[str] = set()
+    for header in headers:
+        if not isinstance(header, str):
+            raise ValueError("model event metadata headers must be strings")
+        name = header.strip().lower()
+        if not name:
+            raise ValueError("model event metadata headers cannot be empty")
+        if not _is_valid_http_header_name(name):
+            raise ValueError(
+                "model event metadata headers must be valid HTTP token names"
+            )
+        if any(part in name for part in _SENSITIVE_MODEL_EVENT_METADATA_HEADER_PARTS):
+            raise ValueError(
+                "model event metadata headers cannot include sensitive headers"
+            )
+        normalized.add(name)
+    return frozenset(normalized)
 
 
 class AgentBridge:
@@ -47,9 +103,13 @@ class AgentBridge:
         model_event_sink: ModelEventSink | None = None,
         forward_generation_config: bool = False,
         approval: list["ApprovalPolicy"] | None = None,
+        accumulate_conversations: bool = False,
         checkpointer: Checkpointer | None = None,
         allow_remote_mcp: bool = True,
         allow_remote_media: bool = False,
+        model_resolver: ModelResolver | None = None,
+        response_filter: ModelResponseFilter | None = None,
+        model_event_metadata_headers: Sequence[str] | None = None,
     ) -> None:
         # Capabilities a client-declared request may reach for. Media defaults
         # closed so new bridge subclasses cannot accidentally grant host I/O.
@@ -95,15 +155,21 @@ class AgentBridge:
             value_type=list[ChatMessage],
         )
         self.filter = filter
+        self.response_filter = response_filter
         self.retry_refusals = retry_refusals
         self.model = model
         self.model_aliases: dict[str, str | Model] = model_aliases or {}
+        self.model_resolver = model_resolver
         self.model_event_sink = model_event_sink
+        self.model_event_metadata_headers = _normalize_model_event_metadata_headers(
+            model_event_metadata_headers
+        )
         self.forward_generation_config = forward_generation_config
         self.approval = approval
         self._compaction = compaction
         self._compact: Compact | None = None
-        self._last_message_count = 0
+        self._last_message_counts: dict[str | None, int] = {}
+        self._primary_model: str | None = None
         # thread-tracking state for _track_state (see its docstring). the
         # descent anchor is the initial input (via _compaction_prefix, which
         # restores to the original input on checkpoint resume).
@@ -118,6 +184,19 @@ class AgentBridge:
         self._tracked_descends: _Descent | None = None
         self._candidate_fps: list[_MessageFingerprint] | None = None
         self._pending_operator = 0
+        # accumulation state for _accumulate_conversation (see its docstring). Adopted on
+        # ANY resume, unlike bridge_messages above: the scaffold replays only the
+        # conversation it was in, so dropping the rest would lose every earlier one for
+        # good -- and they are the whole point of accumulating. Replays do not duplicate,
+        # because a call equal to or contained in a stored conversation is absorbed rather
+        # than appended.
+        self._accumulate_conversations = accumulate_conversations
+        self._conversations: list[_Conversation] = self._cp.track(
+            "bridge_conversations",
+            lambda: self._conversations,
+            [],
+            value_type=list[_Conversation],
+        )
         self._operator_keys: set[str] = set()
 
     state: AgentState
@@ -127,6 +206,20 @@ class AgentBridge:
     """Filter for bridge model generation.
 
     A filter may substitute for the default model generation by returning a ModelOutput or return None to allow default processing to continue.
+    """
+
+    response_filter: ModelResponseFilter | None
+    """Filter that mutates the model's output after generation.
+
+    Runs inside the refusal-retry loop, after ``model.generate()`` returns
+    and after the compaction baseline is updated from that call's actual
+    usage. Returning ``None`` passes the output through unchanged; returning
+    a ``ModelOutput`` replaces it. Returning an output with
+    ``stop_reason="content_filter"`` triggers a retry (subject to
+    ``retry_refusals``).
+
+    See ``ModelResponseFilter`` for guidance on cross-turn consistency when
+    mutating tool_use arguments.
     """
 
     model: str | None
@@ -141,6 +234,13 @@ class AgentBridge:
     is used instead.  Checked before the fallback ``model``.
     """
 
+    model_resolver: ModelResolver | None
+    """Dynamic per-request model routing policy.  Called with the requested
+    model name after ``model_aliases`` and before the static ``model`` fallback;
+    returning a ``Model``/spec routes the request there, ``None`` defers to the
+    fallback.  Lets a bridge route by policy without enumerating every name.
+    """
+
     model_event_sink: ModelEventSink | None
     """Optional sink that takes ownership of `ModelEvent` emission for calls
     routed through the bridge. When set, the bridge installs it around
@@ -148,6 +248,14 @@ class AgentBridge:
     complete events to the sink instead of emitting them to the transcript.
     Use this to attribute bridge model events to externally-managed agent
     spans (e.g. spans driven by a side-channel event stream).
+    """
+
+    model_event_metadata_headers: frozenset[str]
+    """Lower-case inbound header names copied into bridged `ModelEvent` metadata.
+
+    Empty by default. When configured, a bridge copies only these names from
+    per-request metadata headers into the `BRIDGE_REQUEST_HEADERS` mapping.
+    Sensitive header names are rejected at construction.
     """
 
     forward_generation_config: bool
@@ -261,7 +369,12 @@ class AgentBridge:
 
     _message_ids: dict[str, list[str]]
 
-    async def _track_state(self, input: list[ChatMessage], output: ModelOutput) -> None:
+    async def _track_state(
+        self,
+        input: list[ChatMessage],
+        output: ModelOutput,
+        model: str | None = None,
+    ) -> None:
         """Track agent state by observing generations made through the bridge.
 
         We need to distinguish the "main" thread of generation from side /
@@ -309,8 +422,24 @@ class AgentBridge:
           loop reclaims it on resumption, by extension when it makes several
           further calls (candidate promotion) or by the longer-descending-call
           displacement above when it makes only one.
+
+        When `accumulate_conversations` is set, none of the above applies: every
+        conversation observed over the bridge is kept and concatenated instead of
+        one being chosen. See `_accumulate_conversation`.
         """
+        if self._accumulate_conversations:
+            self._accumulate_conversation(input, output)
+            await self._cp.tick()
+            return
         messages = input + [output.message]
+        last_message_count = self._last_message_counts.get(model, 0)
+        if model is not None and self._primary_model is None:
+            self._primary_model = model
+        if model is not None and model != self._primary_model:
+            self._last_message_counts[model] = len(messages)
+            await self._cp.tick()
+            return
+
         fps = [_message_fingerprint(m) for m in messages]
 
         if self._tracked_fps is None:
@@ -341,7 +470,7 @@ class AgentBridge:
                 # (flapping guard).
                 self._adopt_thread(messages, output, fps, calls=1)
             elif descends == self._tracked_descends and len(messages) > (
-                len(self._tracked_fps) if descends else self._last_message_count
+                len(self._tracked_fps) if descends else last_message_count
             ):
                 # legacy length heuristic. when both threads descend, compare
                 # against the tracked thread so a parked side call can't lower
@@ -354,10 +483,109 @@ class AgentBridge:
             else:
                 self._candidate_fps = fps
 
-        self._last_message_count = len(messages)
+        self._last_message_counts[model] = len(messages)
 
         # tick the checkpointer
         await self._cp.tick()
+
+    def _accumulate_conversation(
+        self, input: list[ChatMessage], output: ModelOutput
+    ) -> None:
+        """Keep EVERY conversation observed over the bridge, not just the main one.
+
+        `_track_state` chooses one "main" thread because a scaffold runs one agent
+        loop and its side calls are noise. A sandbox is not a scaffold: nothing
+        constrains it to one conversation, and a human-driven or multi-invocation
+        harness routinely runs several independent ones through the same bridge (for
+        example an operator running `claude -p` several times). Choosing one then
+        silently discards the rest, and the discarded ones exist nowhere in the
+        resulting sample.
+
+        A call is matched to the conversation it CONTINUES: the one whose messages are
+        a prefix of this call's, longest first. Matching is by `(role, text)` over
+        non-system messages, because a scaffold may rewrite its system prompt per
+        request (Claude Code stamps a per-request cache token into it) and matching on
+        it would make every call a new conversation.
+
+        "Prefix" is deliberately not-strict, and re-sends are absorbed rather than
+        appended, because a repeat is not a new conversation. A call identical to one
+        already stored REPLACES it, and a call already CONTAINED in a stored
+        conversation is dropped. Requiring a strict extension instead forks a whole
+        replica on any exact repeat -- two invocations making the same deterministic
+        aux call (Claude Code's bash-path probe) fingerprint identically -- and the
+        fork can never re-merge, so it strands a permanent stale duplicate whose tail
+        then sits at the end of `state.messages`.
+
+        Only genuinely new work starts a conversation. That still admits a one-shot
+        side call, because without a session identifier a real one-shot invocation is
+        indistinguishable from an aux call and dropping it loses real work; and two
+        calls sharing a history but answering DIFFERENTLY stay separate, since merging
+        them would invent a conversation in which one prompt drew two consecutive
+        replies.
+
+        `state.output` is this call, not the last conversation's: conversations keep
+        first-seen order, so a call resuming an earlier one leaves `state.messages`
+        ending on a later conversation. Order is the property this option exists to
+        provide, so it wins, and `state.messages[-1]` is not guaranteed to be
+        `state.output`'s message. Indexing output by conversation order instead lets a
+        single late side call poison it for the rest of the run.
+        """
+        messages = input + [output.message]
+        key = _non_system([_message_fingerprint(m) for m in messages])
+        continued: int | None = None
+        for index, conversation in enumerate(self._conversations):
+            if _is_prefix(conversation.key, key) and (
+                continued is None
+                or len(conversation.key) > len(self._conversations[continued].key)
+            ):
+                continued = index
+        if continued is None:
+            # Already covered by a stored conversation (a re-send of an earlier turn):
+            # it carries nothing the longer form does not.
+            if not any(_is_prefix(key, c.key) for c in self._conversations):
+                self._conversations.append(
+                    _Conversation(key=key, messages=messages, output=output)
+                )
+        else:
+            self._conversations[continued] = _Conversation(
+                key=key, messages=messages, output=output
+            )
+            # Absorb any other conversation this one now contains, so a fork that
+            # happened before the two met cannot persist as a stale duplicate.
+            self._conversations = [
+                conversation
+                for index, conversation in enumerate(self._conversations)
+                if index == continued or not _is_prefix(conversation.key, key)
+            ]
+        self.state.messages = self._flattened_conversations()
+        self.state.output = output
+
+    def _flattened_conversations(self) -> list[ChatMessage]:
+        """Every conversation concatenated in first-seen order, with unique message ids.
+
+        Ids are allocated from message CONTENT (`_id_for_message`), and each request only
+        ever sees its own conversation, so independent conversations that repeat a turn --
+        replicas of one script, a re-asked prompt -- arrive carrying the SAME id, while
+        `ChatMessage.id` is documented unique.
+
+        A repeat is re-identified on a copy that is written BACK into its conversation, so
+        the new id is allocated once and then held. Re-deriving it per call instead would
+        hand the same message a different id on every generation, which defeats the id
+        stability `apply_message_ids` exists to provide and breaks every consumer that
+        joins on the id (`log/_condense.py`'s walk cache, `solver/_run.py`'s prefix diff,
+        matching `sample.messages` back to `ModelEvent.input`).
+        """
+        flattened: list[ChatMessage] = []
+        seen: set[str] = set()
+        for conversation in self._conversations:
+            for position, message in enumerate(conversation.messages):
+                if message.id in seen:
+                    message = message.model_copy(update={"id": uuid()})
+                    conversation.messages[position] = message
+                if message.id is not None:
+                    seen.add(message.id)
+                flattened.append(message)
+        return flattened
 
     def _adopt_thread(
         self,
@@ -568,6 +796,38 @@ def _condensed_fingerprint(fp: _MessageFingerprint) -> _MessageFingerprint:
     return _MessageFingerprint(
         role=fp.role, text_hash=mm3_hash(f"{ATTACHMENT_PROTOCOL}{fp.text_hash}")
     )
+
+
+@dataclass
+class _Conversation:
+    """One conversation observed over the bridge (see `_accumulate_conversation`)."""
+
+    key: list[_MessageFingerprint]
+    messages: list[ChatMessage]
+    output: ModelOutput
+
+
+def _is_prefix(
+    prefix: list[_MessageFingerprint], fps: list[_MessageFingerprint]
+) -> bool:
+    """Whether `fps` continues `prefix`, or is exactly it."""
+    return len(fps) >= len(prefix) and fps[: len(prefix)] == prefix
+
+
+def _non_system(fps: list[_MessageFingerprint]) -> list[_MessageFingerprint]:
+    """Fingerprints of the non-system messages, for conversation-continuation matching.
+
+    A scaffold may rewrite its system prompt on every request -- Claude Code stamps a
+    per-request cache token into it -- so successive calls in one conversation need not
+    share a system-message fingerprint, and matching on it would make every call look
+    like a new conversation.
+
+    Used only by `_accumulate_conversation`. Main-thread tracking keeps comparing whole
+    message lists: a system prompt still carries meaning there (two sub-agents can share
+    a user prompt while differing only in role), and its `_extends` check is backed by the
+    length and descent heuristics rather than standing alone.
+    """
+    return [fp for fp in fps if fp.role != "system"]
 
 
 def _extends(prefix: list[_MessageFingerprint], fps: list[_MessageFingerprint]) -> bool:
