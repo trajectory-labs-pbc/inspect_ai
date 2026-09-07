@@ -1,14 +1,14 @@
 """Tests for AgentBridge._track_state main-thread tracking.
 
-The bridge observes every generation a scaffold makes (main agent loop,
-side calls like opencode's session title generation, sub-agent loops,
-post-compaction continuations) and must surface the *main* conversation
-as the agent state. See meridianlabs-ai/inspect_ai#140 for the failure
-mode where a longer side call permanently displaced the real conversation.
+The bridge tracks selected model generations as agent state while side requests
+can remain outside the canonical conversation.
 """
 
+from collections.abc import Sequence
 from typing import Any
 
+import pytest
+from pydantic import TypeAdapter
 from test_helpers.checkpoint import RecordingCheckpointer
 
 from inspect_ai._util.hash import mm3_hash
@@ -20,6 +20,7 @@ from inspect_ai.agent._bridge.util import (
     default_code_execution_providers,
     internal_web_search_providers,
 )
+from inspect_ai.event._model import ModelEvent
 from inspect_ai.model._chat_message import (
     ChatMessage,
     ChatMessageAssistant,
@@ -29,6 +30,7 @@ from inspect_ai.model._chat_message import (
 )
 from inspect_ai.model._model import Model, get_model
 from inspect_ai.model._model_output import ModelOutput, ModelUsage
+from inspect_ai.tool import ToolCall
 
 TASK = "In the year 2022, what castle did the Doctor spend 4.5 billion years in?"
 
@@ -1418,13 +1420,28 @@ def scenario_model(completions: list[str]) -> Model:
     )
 
 
-async def test_completions_handler_tracks_main_thread_end_to_end() -> None:
+class RecordingModelEvents:
+    """Capture lifecycle events emitted by bridge request handlers."""
+
+    def __init__(self) -> None:
+        self.pending: list[ModelEvent] = []
+        self.completed: list[ModelEvent] = []
+
+    def on_pending(self, event: ModelEvent) -> None:
+        self.pending.append(event)
+
+    def on_complete(self, event: ModelEvent) -> None:
+        self.completed.append(event)
+
+
+async def test_completions_handler_tracks_main_thread_and_preserves_producer_id() -> (
+    None
+):
     """The opencode scenario through the real OpenAI completions handler.
 
-    Exercises message conversion, system-prompt handling and message-id
-    assignment together with `_track_state`: `apply_message_ids` gives every
-    request fresh ids, so thread continuity must survive the full request
-    path, not just hand-constructed messages.
+    The mock model returns `ModelOutput` only, without a provider response id.
+    A second scaffold request therefore must retain the first bridge-produced
+    assistant object rather than its synthetic request-history copy.
     """
     model = scenario_model(
         ["Doctor Who Series 9 setting", "let me look into that", "Castle"]
@@ -1457,6 +1474,11 @@ async def test_completions_handler_tracks_main_thread_end_to_end() -> None:
     reply = await request(main)
     assert reply == "let me look into that"
     assert bridge.state.output.completion == "let me look into that"
+    producer = bridge.state.messages[-1]
+    assert isinstance(producer, ChatMessageAssistant)
+    assert producer.source == "generate"
+    producer_id = producer.id
+    assert producer_id is not None
 
     # main loop: turn 2 (scaffold round-trips through its own store)
     main = main + [
@@ -1473,6 +1495,79 @@ async def test_completions_handler_tracks_main_thread_end_to_end() -> None:
         "please continue",
         "Castle",
     ]
+    assert bridge.state.messages[2] is producer
+    assert bridge.state.messages[2].id == producer_id
+
+
+async def test_tracked_extension_preserves_producer_metadata_after_serialization() -> (
+    None
+):
+    """A continued request retains the known output, not its inbound carrier."""
+    bridge = task_bridge()
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    producer_output = ModelOutput.from_content("mockllm/model", "working")
+    producer_output.message.id = "native-output"
+    producer_output.message.metadata = {"native_event_id": "event-1"}
+    await bridge._track_state(first, producer_output)
+
+    carrier = ChatMessageAssistant(
+        content="working",
+        id="synthetic-history",
+        metadata={"request_id": "request-2"},
+    )
+    continued: list[ChatMessage] = [
+        *first,
+        carrier,
+        ChatMessageUser(content="please continue"),
+    ]
+    await track(bridge, continued, "Castle")
+
+    assert bridge.state.messages[2] is producer_output.message
+    serialized = TypeAdapter(list[ChatMessage]).dump_json(bridge.state.messages)
+    restored = TypeAdapter(list[ChatMessage]).validate_json(serialized)
+    assert restored[2].id == "native-output"
+    assert restored[2].metadata == {"native_event_id": "event-1"}
+
+
+async def test_tracked_extension_does_not_preserve_identity_when_tool_args_rewrite() -> (
+    None
+):
+    """Matching text is not enough to carry an output's producer identity."""
+    bridge = task_bridge()
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    producer_output = ModelOutput.for_tool_call(
+        "mockllm/model",
+        "read_file",
+        {"path": "/workspace/original.txt"},
+        tool_call_id="tool-1",
+    )
+    producer_output.message.id = "native-output"
+    producer_output.message.metadata = {"native_event_id": "event-1"}
+    await bridge._track_state(first, producer_output)
+
+    rewritten_call = ToolCall(
+        id="tool-1",
+        function="read_file",
+        arguments={"path": "/workspace/rewritten.txt"},
+    )
+    carrier = ChatMessageAssistant(
+        content=producer_output.message.text,
+        id="synthetic-history",
+        tool_calls=[rewritten_call],
+    )
+    continued: list[ChatMessage] = [
+        *first,
+        carrier,
+        ChatMessageTool(
+            content="rewritten contents",
+            tool_call_id=rewritten_call.id,
+            function=rewritten_call.function,
+        ),
+    ]
+    await track(bridge, continued, "Castle")
+
+    assert bridge.state.messages[2] is carrier
+    assert bridge.state.messages[2].id == "synthetic-history"
 
 
 async def test_anthropic_handler_tracks_main_thread_end_to_end() -> None:
@@ -1532,3 +1627,796 @@ async def test_anthropic_handler_tracks_main_thread_end_to_end() -> None:
         "please continue",
         "Castle",
     ]
+
+
+@pytest.mark.parametrize("main_first", [True, False])
+async def test_state_filter_preserves_main_state_and_excluded_request_accounting(
+    main_first: bool,
+) -> None:
+    """Excluded real-handler requests emit normally without changing state."""
+    completions = (
+        [
+            "Castle",
+            "Doctor Who Series 9 setting",
+            "/tmp",
+            "Castle after search",
+        ]
+        if main_first
+        else [
+            "Doctor Who Series 9 setting",
+            "Castle",
+            "/tmp",
+            "Castle after search",
+        ]
+    )
+    events = RecordingModelEvents()
+    checkpointer = RecordingCheckpointer()
+
+    def state_filter(messages: Sequence[ChatMessage]) -> bool:
+        return any(
+            isinstance(message, ChatMessageSystem) and message.text == TASK_SYSTEM.text
+            for message in messages
+        )
+
+    bridge = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        model_aliases={BRIDGE_MODEL: scenario_model(completions)},
+        model_event_sink=events,
+        checkpointer=checkpointer,
+        state_filter=state_filter,
+    )
+    responses: list[Any] = []
+
+    async def request(messages: list[dict[str, str]]) -> Any:
+        response = await inspect_completions_api_request(
+            {"model": BRIDGE_MODEL, "messages": messages}, None, bridge
+        )
+        responses.append(response)
+        return response
+
+    main = [
+        {"role": "system", "content": TASK_SYSTEM.text},
+        {"role": "user", "content": TASK},
+    ]
+    title = [
+        {"role": "system", "content": "You are a title generator ..."},
+        {"role": "user", "content": "Generate a title for this conversation:"},
+        {"role": "user", "content": TASK},
+        {"role": "user", "content": "Respond with the title only."},
+    ]
+    unrelated = [
+        {"role": "system", "content": "You are a path detector ..."},
+        {"role": "user", "content": "Extract the path from: ls /tmp"},
+    ]
+    if main_first:
+        main_response = await request(main)
+        title_response = await request(title)
+    else:
+        title_response = await request(title)
+        main_response = await request(main)
+
+    assert main_response.choices[0].message.content == "Castle"
+    assert title_response.choices[0].message.content == "Doctor Who Series 9 setting"
+    assert bridge.state.output.completion == "Castle"
+    assert [message.text for message in bridge.state.messages] == [
+        TASK_SYSTEM.text,
+        TASK,
+        "Castle",
+    ]
+    tracked_state = (
+        bridge._tracked_fps,
+        bridge._tracked_calls,
+        bridge._tracked_descends,
+        bridge._candidate_fps,
+        bridge._candidate_messages,
+        bridge._last_message_counts.copy(),
+        bridge._primary_model,
+    )
+
+    await request(unrelated)
+
+    assert bridge.state.output.completion == "Castle"
+    assert (
+        bridge._tracked_fps,
+        bridge._tracked_calls,
+        bridge._tracked_descends,
+        bridge._candidate_fps,
+        bridge._candidate_messages,
+        bridge._last_message_counts,
+        bridge._primary_model,
+    ) == tracked_state
+
+    await request(
+        main
+        + [
+            {"role": "assistant", "content": "Castle"},
+            {"role": "user", "content": "Continue with the result."},
+        ]
+    )
+
+    assert bridge.state.output.completion == "Castle after search"
+    assert [message.text for message in bridge.state.messages] == [
+        TASK_SYSTEM.text,
+        TASK,
+        "Castle",
+        "Continue with the result.",
+        "Castle after search",
+    ]
+    assert all(message.id is not None for message in bridge.state.messages[:-1])
+    assert len(events.pending) == len(events.completed) == 4
+    assert [event.output.completion for event in events.completed] == completions
+    assert all(event.output.usage is not None for event in events.completed)
+    assert [
+        event.output.usage.total_tokens if event.output.usage is not None else None
+        for event in events.completed
+    ] == [1, 1, 1, 1]
+    response_ids = [response.id for response in responses]
+    assert all(response_ids)
+    assert len(set(response_ids)) == 4
+    event_ids = [event.uuid for event in events.completed]
+    assert all(event_ids)
+    assert len(set(event_ids)) == 4
+    assert [
+        response.usage.total_tokens if response.usage is not None else None
+        for response in responses
+    ] == [1, 1, 1, 1]
+    assert checkpointer.ticks == 4
+
+
+async def test_state_filter_exception_propagates_from_completion_handler() -> None:
+    """A filter failure is not converted into untracked request state."""
+
+    def state_filter(_messages: Sequence[ChatMessage]) -> bool:
+        raise RuntimeError("state filter failed")
+
+    bridge = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        model_aliases={BRIDGE_MODEL: scenario_model(["Castle"])},
+        state_filter=state_filter,
+    )
+
+    with pytest.raises(RuntimeError, match="state filter failed"):
+        await inspect_completions_api_request(
+            {
+                "model": BRIDGE_MODEL,
+                "messages": [
+                    {"role": "system", "content": TASK_SYSTEM.text},
+                    {"role": "user", "content": TASK},
+                ],
+            },
+            None,
+            bridge,
+        )
+
+
+async def test_state_filter_defaults_to_tracking_all_handler_requests() -> None:
+    """Without a state filter, the handler retains its existing behavior."""
+    bridge = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        model_aliases={BRIDGE_MODEL: scenario_model(["Castle"])},
+    )
+
+    await inspect_completions_api_request(
+        {
+            "model": BRIDGE_MODEL,
+            "messages": [
+                {"role": "system", "content": TASK_SYSTEM.text},
+                {"role": "user", "content": TASK},
+            ],
+        },
+        None,
+        bridge,
+    )
+
+    assert bridge.state.output.completion == "Castle"
+    assert [message.text for message in bridge.state.messages] == [
+        TASK_SYSTEM.text,
+        TASK,
+        "Castle",
+    ]
+
+
+async def test_state_filter_rejects_exact_main_extension_without_state_mutation() -> (
+    None
+):
+    """An excluded extension leaves an established main thread unchanged."""
+    events = RecordingModelEvents()
+    checkpointer = RecordingCheckpointer()
+
+    def state_filter(messages: Sequence[ChatMessage]) -> bool:
+        return not any(
+            isinstance(message, ChatMessageAssistant) for message in messages
+        )
+
+    bridge = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        model_aliases={
+            BRIDGE_MODEL: scenario_model(["Castle", "Ignored continuation"])
+        },
+        model_event_sink=events,
+        checkpointer=checkpointer,
+        state_filter=state_filter,
+    )
+
+    async def request(messages: list[dict[str, str]]) -> Any:
+        return await inspect_completions_api_request(
+            {"model": BRIDGE_MODEL, "messages": messages}, None, bridge
+        )
+
+    main = [
+        {"role": "system", "content": TASK_SYSTEM.text},
+        {"role": "user", "content": TASK},
+    ]
+    first_response = await request(main)
+    tracked_state = (
+        bridge._tracked_fps,
+        bridge._tracked_calls,
+        bridge._tracked_descends,
+        bridge._candidate_fps,
+        bridge._candidate_messages,
+        bridge._last_message_counts.copy(),
+        bridge._primary_model,
+    )
+
+    continuation_response = await request(
+        main
+        + [
+            {"role": "assistant", "content": "Castle"},
+            {"role": "user", "content": "Continue with the result."},
+        ]
+    )
+
+    assert first_response.choices[0].message.content == "Castle"
+    assert continuation_response.choices[0].message.content == "Ignored continuation"
+    assert bridge.state.output.completion == "Castle"
+    assert [message.text for message in bridge.state.messages] == [
+        TASK_SYSTEM.text,
+        TASK,
+        "Castle",
+    ]
+    assert (
+        bridge._tracked_fps,
+        bridge._tracked_calls,
+        bridge._tracked_descends,
+        bridge._candidate_fps,
+        bridge._candidate_messages,
+        bridge._last_message_counts,
+        bridge._primary_model,
+    ) == tracked_state
+    assert len(events.pending) == len(events.completed) == 2
+    assert [event.output.completion for event in events.completed] == [
+        "Castle",
+        "Ignored continuation",
+    ]
+    assert all(event.output.usage is not None for event in events.completed)
+    assert [
+        event.output.usage.total_tokens if event.output.usage is not None else None
+        for event in events.completed
+    ] == [1, 1]
+    assert first_response.id
+    assert continuation_response.id
+    assert first_response.id != continuation_response.id
+    assert [
+        response.usage.total_tokens if response.usage is not None else None
+        for response in [first_response, continuation_response]
+    ] == [1, 1]
+    assert checkpointer.ticks == 2
+
+
+async def test_state_filter_error_on_main_extension_preserves_state() -> None:
+    """A rejected extension propagates its filter error before state mutation."""
+    events = RecordingModelEvents()
+    checkpointer = RecordingCheckpointer()
+
+    def state_filter(messages: Sequence[ChatMessage]) -> bool:
+        if any(isinstance(message, ChatMessageAssistant) for message in messages):
+            raise RuntimeError("state filter rejected main continuation")
+        return True
+
+    bridge = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        model_aliases={
+            BRIDGE_MODEL: scenario_model(["Castle", "Ignored continuation"])
+        },
+        model_event_sink=events,
+        checkpointer=checkpointer,
+        state_filter=state_filter,
+    )
+
+    main = [
+        {"role": "system", "content": TASK_SYSTEM.text},
+        {"role": "user", "content": TASK},
+    ]
+    first_response = await inspect_completions_api_request(
+        {"model": BRIDGE_MODEL, "messages": main}, None, bridge
+    )
+    tracked_state = (
+        bridge._tracked_fps,
+        bridge._tracked_calls,
+        bridge._tracked_descends,
+        bridge._candidate_fps,
+        bridge._candidate_messages,
+        bridge._last_message_counts.copy(),
+        bridge._primary_model,
+    )
+
+    with pytest.raises(RuntimeError, match="state filter rejected main continuation"):
+        await inspect_completions_api_request(
+            {
+                "model": BRIDGE_MODEL,
+                "messages": main
+                + [
+                    {"role": "assistant", "content": "Castle"},
+                    {"role": "user", "content": "Continue with the result."},
+                ],
+            },
+            None,
+            bridge,
+        )
+
+    assert first_response.id
+    assert bridge.state.output.completion == "Castle"
+    assert [message.text for message in bridge.state.messages] == [
+        TASK_SYSTEM.text,
+        TASK,
+        "Castle",
+    ]
+    assert (
+        bridge._tracked_fps,
+        bridge._tracked_calls,
+        bridge._tracked_descends,
+        bridge._candidate_fps,
+        bridge._candidate_messages,
+        bridge._last_message_counts,
+        bridge._primary_model,
+    ) == tracked_state
+    assert len(events.pending) == len(events.completed) == 2
+    assert [event.output.completion for event in events.completed] == [
+        "Castle",
+        "Ignored continuation",
+    ]
+    assert all(event.output.usage is not None for event in events.completed)
+    assert [
+        event.output.usage.total_tokens if event.output.usage is not None else None
+        for event in events.completed
+    ] == [1, 1]
+    # The exception occurs before `_track_state` reaches its ordinary tick.
+    assert checkpointer.ticks == 1
+
+
+# ---------------------------------------------------------------------------
+# accumulate_conversations: keep every conversation, not just the main one
+# ---------------------------------------------------------------------------
+
+
+def accumulating_bridge() -> AgentBridge:
+    return AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        accumulate_conversations=True,
+    )
+
+
+def cc_system(nonce: int) -> ChatMessageSystem:
+    """Claude Code's system prompt, which carries a per-request cache token."""
+    return ChatMessageSystem(
+        content=f"x-anthropic-billing-header: cc_version=2.1.126; cch={nonce:05x};\n\nYou are a Claude agent."
+    )
+
+
+async def test_accumulation_keeps_same_model_children_with_distinct_tool_histories() -> (
+    None
+):
+    """Tool calls distinguish same-model children with otherwise identical text."""
+    bridge = accumulating_bridge()
+
+    def lookup_history(query: str) -> list[ChatMessage]:
+        call = ToolCall(
+            id=f"lookup-{query}",
+            function="lookup",
+            arguments={"query": query},
+        )
+        return [
+            TASK_SYSTEM,
+            ChatMessageUser(content="Find the castle."),
+            ChatMessageAssistant(
+                content="", model="mockllm/native-child", tool_calls=[call]
+            ),
+            ChatMessageTool(
+                content="lookup result",
+                tool_call_id=call.id,
+                function=call.function,
+            ),
+        ]
+
+    await track(bridge, lookup_history("A"), "done")
+    await track(bridge, lookup_history("B"), "done")
+
+    tool_calls = [
+        call
+        for message in bridge.state.messages
+        if isinstance(message, ChatMessageAssistant)
+        for call in message.tool_calls or []
+    ]
+    assert [call.arguments["query"] for call in tool_calls] == ["A", "B"]
+    assert [
+        message.tool_call_id
+        for message in bridge.state.messages
+        if isinstance(message, ChatMessageTool)
+    ] == ["lookup-A", "lookup-B"]
+
+
+async def test_accumulation_preserves_producer_identity_across_system_rewrite() -> None:
+    """A continued native CLI conversation keeps its first producer object."""
+    bridge = accumulating_bridge()
+    first: list[ChatMessage] = [cc_system(1), ChatMessageUser(content=TASK)]
+    producer_output = ModelOutput.from_content("mockllm/model", "working")
+    producer_output.message.id = "native-output"
+    producer_output.message.metadata = {"native_event_id": "event-1"}
+    await bridge._track_state(first, producer_output)
+
+    carrier = ChatMessageAssistant(
+        content="working",
+        id="synthetic-history",
+        metadata={"request_id": "request-2"},
+    )
+    continued: list[ChatMessage] = [
+        cc_system(2),
+        ChatMessageUser(content=TASK),
+        carrier,
+        ChatMessageTool(content="tool result"),
+    ]
+    await track(bridge, continued, "Castle")
+
+    producer = next(
+        message for message in bridge.state.messages if message.text == "working"
+    )
+    assert producer is producer_output.message
+    assert producer.id == "native-output"
+    assert producer.metadata == {"native_event_id": "event-1"}
+
+
+async def test_every_conversation_is_kept_not_just_the_main_one() -> None:
+    """Two independent conversations (e.g. two `claude -p` runs) both reach the state."""
+    bridge = accumulating_bridge()
+
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    out = await track(bridge, first, "castle answer")
+    await track(
+        bridge, first + [out.message, ChatMessageTool(content="t")], "castle detail"
+    )
+
+    second: list[ChatMessage] = [
+        TASK_SYSTEM,
+        ChatMessageUser(content="Unrelated second question."),
+    ]
+    await track(bridge, second, "second answer")
+
+    texts = [m.text for m in bridge.state.messages]
+    assert "castle detail" in texts
+    assert "second answer" in texts
+    assert texts.index("castle detail") < texts.index("second answer")
+    # the first conversation is kept once, in its longest form -- not once per call
+    assert texts.count("castle answer") == 1
+    # output describes the final message
+    assert bridge.state.output.completion == "second answer"
+    assert texts[-1] == "second answer"
+
+
+async def test_accumulation_survives_a_per_request_system_prompt() -> None:
+    """A growing Claude Code conversation is ONE conversation, not one per call."""
+    bridge = accumulating_bridge()
+
+    turn: list[ChatMessage] = [cc_system(1), ChatMessageUser(content=TASK)]
+    out = await track(bridge, turn, "step 1")
+    for step in range(2, 5):
+        turn = [cc_system(step), *turn[1:], out.message, ChatMessageTool(content="t")]
+        out = await track(bridge, turn, f"step {step}")
+
+    texts = [m.text for m in bridge.state.messages]
+    assert texts.count("step 1") == 1
+    assert texts.count(TASK) == 1
+    assert texts[-1] == "step 4"
+
+
+async def test_accumulation_keeps_divergent_answers_to_one_history() -> None:
+    """Two answers to an identical history stay separate rather than being merged."""
+    bridge = accumulating_bridge()
+
+    history: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    await track(bridge, history, "answer A")
+    await track(bridge, history, "answer B")
+
+    texts = [m.text for m in bridge.state.messages]
+    assert "answer A" in texts
+    assert "answer B" in texts
+
+
+async def test_main_thread_tracking_is_the_default() -> None:
+    """Without the flag the bridge still surfaces one main conversation."""
+    bridge = task_bridge()
+
+    await track(bridge, [TASK_SYSTEM, ChatMessageUser(content=TASK)], "castle answer")
+    await track(
+        bridge, [TASK_SYSTEM, ChatMessageUser(content="Unrelated.")], "second answer"
+    )
+
+    assert "second answer" not in [m.text for m in bridge.state.messages]
+
+
+async def test_a_repeated_call_does_not_fork_a_replica() -> None:
+    """An exact repeat is the same conversation, not a new one.
+
+    Two invocations making the same deterministic aux call (claude code's bash-path probe)
+    fingerprint identically. Requiring a strict extension forks a whole replica on each.
+    """
+    bridge = accumulating_bridge()
+
+    call: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    await track(bridge, call, "Castle")
+    await track(bridge, call, "Castle")
+
+    assert [m.text for m in bridge.state.messages] == [TASK_SYSTEM.text, TASK, "Castle"]
+
+
+async def test_a_resend_after_growth_is_absorbed_not_stranded() -> None:
+    """A re-sent earlier turn carries nothing the grown conversation does not.
+
+    Appending it instead strands a fork that can never re-merge -- every later call
+    extends the longer copy -- leaving a stale duplicate at the end of state.messages.
+    """
+    bridge = accumulating_bridge()
+
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    out = await track(bridge, first, "working")
+    grown = [*first, out.message, ChatMessageTool(content="tool result")]
+    await track(bridge, grown, "Castle")
+    await track(bridge, first, "working")
+
+    texts = [m.text for m in bridge.state.messages]
+    assert texts == [TASK_SYSTEM.text, TASK, "working", "tool result", "Castle"]
+
+
+async def test_a_late_side_call_does_not_poison_the_output() -> None:
+    """state.output is the newest call, not whichever conversation started last.
+
+    Indexing it by conversation order lets one aux call landing after the main loop's
+    first turn own the output for the rest of the run -- the meridianlabs-ai/inspect_ai#140
+    failure this tracker exists to prevent.
+    """
+    bridge = accumulating_bridge()
+
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    out = await track(bridge, first, "working")
+    await track(bridge, [ChatMessageUser(content="Detect paths in: ls /tmp")], "/tmp")
+    await track(bridge, [*first, out.message, ChatMessageTool(content="t")], "Castle")
+
+    assert bridge.state.output.completion == "Castle"
+
+
+async def test_accumulated_message_ids_are_unique_and_stable() -> None:
+    """Accumulated message ids must be unique AND stable.
+
+    Ids are content-derived and each request sees only its own conversation, so
+    independent conversations that repeat a turn arrive carrying the SAME id while
+    `ChatMessage.id` is documented unique.
+
+    The re-assigned id must be allocated ONCE and held: re-deriving it per call hands the
+    same message a new id every generation, defeating the stability `apply_message_ids`
+    provides and breaking every consumer that joins on the id.
+    """
+    bridge = accumulating_bridge()
+
+    await track(bridge, [ChatMessageUser(content="question one", id="collide")], "A")
+    await track(bridge, [ChatMessageUser(content="question two", id="collide")], "B")
+    first = [m.id for m in bridge.state.messages]
+
+    for index in range(3):
+        await track(bridge, [ChatMessageUser(content=f"other {index}")], f"o{index}")
+    later = [m.id for m in bridge.state.messages]
+
+    assert len(later) == len(set(later))
+    assert later[: len(first)] == first
+
+
+async def test_flattening_keeps_producer_identity_when_carrier_id_collides() -> None:
+    """Deduplicating independent conversations must re-id the carrier, not output."""
+    bridge = accumulating_bridge()
+    await track(
+        bridge,
+        [ChatMessageUser(content="unrelated carrier", id="native-output")],
+        "side result",
+    )
+
+    producer_output = ModelOutput.from_content("mockllm/model", "main result")
+    producer_output.message.id = "native-output"
+    await bridge._track_state(
+        [ChatMessageUser(content="main conversation")], producer_output
+    )
+
+    assert bridge.state.messages[-1] is producer_output.message
+    assert producer_output.message.id == "native-output"
+    assert len({message.id for message in bridge.state.messages}) == len(
+        bridge.state.messages
+    )
+
+
+async def test_accumulated_conversations_keep_first_seen_order() -> None:
+    """A call resuming an earlier conversation does not move it to the end."""
+    bridge = accumulating_bridge()
+
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    out = await track(bridge, first, "first answer")
+
+    second: list[ChatMessage] = [
+        TASK_SYSTEM,
+        ChatMessageUser(content="Second question."),
+    ]
+    await track(bridge, second, "second answer")
+
+    resumed = [*first, out.message, ChatMessageTool(content="t")]
+    await track(bridge, resumed, "first conversation continues")
+
+    texts = [m.text for m in bridge.state.messages]
+    assert texts.index("first conversation continues") < texts.index("second answer")
+    # state.output is the newest work, which is the resumed conversation -- so with
+    # accumulation the last message and state.output need not be the same turn.
+    assert bridge.state.output.completion == "first conversation continues"
+    assert texts[-1] == "second answer"
+
+
+async def test_accumulated_conversations_survive_a_resume() -> None:
+    """A resumed run keeps the conversations it already saw, and a replay does not duplicate.
+
+    The scaffold replays only the conversation it was in, so dropping the rest on resume
+    would lose every earlier one -- and those are the whole point of accumulating. What
+    made dropping them look necessary was appending a replayed call as a new conversation;
+    an equal-or-contained call is now absorbed instead.
+    """
+    first = accumulating_bridge()
+    session_one: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    await track(first, session_one, "session one answer")
+    session_two: list[ChatMessage] = [
+        TASK_SYSTEM,
+        ChatMessageUser(content="Second question."),
+    ]
+    out_two = await track(first, session_two, "session two answer")
+
+    # resume with that state, then let the scaffold replay session two and continue it
+    checkpointer = RecordingCheckpointer(
+        restored={"bridge_conversations": first._conversations}
+    )
+    resumed = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        accumulate_conversations=True,
+        checkpointer=checkpointer,
+    )
+    await track(resumed, session_two, "session two answer")
+    await track(
+        resumed,
+        [*session_two, out_two.message, ChatMessageTool(content="t")],
+        "session two continues",
+    )
+
+    texts = [m.text for m in resumed.state.messages]
+    assert "session one answer" in texts
+    assert texts.count("session two answer") == 1
+    assert texts[-1] == "session two continues"
+
+
+async def test_state_filter_excludes_generated_requests_from_accumulation() -> None:
+    """Excluded requests still emit events but do not enter accumulated state."""
+    completions = [
+        "first answer",
+        "Doctor Who Series 9 setting",
+        "second answer",
+        "Doctor Who Series 9",
+        "first continuation",
+    ]
+    events = RecordingModelEvents()
+    checkpointer = RecordingCheckpointer()
+
+    def state_filter(messages: Sequence[ChatMessage]) -> bool:
+        return any(
+            isinstance(message, ChatMessageSystem) and message.text == TASK_SYSTEM.text
+            for message in messages
+        )
+
+    bridge = AgentBridge(
+        AgentState(messages=[ChatMessageUser(content=TASK)]),
+        model_aliases={BRIDGE_MODEL: scenario_model(completions)},
+        model_event_sink=events,
+        checkpointer=checkpointer,
+        accumulate_conversations=True,
+        state_filter=state_filter,
+    )
+    responses: list[Any] = []
+
+    async def request(messages: list[dict[str, str]]) -> Any:
+        response = await inspect_completions_api_request(
+            {"model": BRIDGE_MODEL, "messages": messages}, None, bridge
+        )
+        responses.append(response)
+        return response
+
+    first = [
+        {"role": "system", "content": TASK_SYSTEM.text},
+        {"role": "user", "content": TASK},
+    ]
+    second = [
+        {"role": "system", "content": TASK_SYSTEM.text},
+        {"role": "user", "content": "What was the Doctor's companion?"},
+    ]
+    title = [
+        {"role": "system", "content": "You are a title generator ..."},
+        {"role": "user", "content": "Generate a title for this conversation:"},
+        {"role": "user", "content": TASK},
+    ]
+
+    await request(first)
+    await request(title)
+    await request(second)
+    await request(
+        title
+        + [
+            {"role": "assistant", "content": "Doctor Who Series 9 setting"},
+            {"role": "user", "content": "Make the title shorter."},
+        ]
+    )
+    await request(
+        first
+        + [
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "Continue the answer."},
+        ]
+    )
+
+    assert [
+        response.choices[0].message.content for response in responses
+    ] == completions
+    texts = [message.text for message in bridge.state.messages]
+    assert texts == [
+        TASK_SYSTEM.text,
+        TASK,
+        "first answer",
+        "Continue the answer.",
+        "first continuation",
+        TASK_SYSTEM.text,
+        "What was the Doctor's companion?",
+        "second answer",
+    ]
+    assert bridge.state.output.completion == "first continuation"
+    assert "Doctor Who Series 9 setting" not in texts
+    assert "Doctor Who Series 9" not in texts
+    assert len(events.pending) == len(events.completed) == 5
+    assert [event.output.completion for event in events.completed] == completions
+    assert [
+        response.usage.total_tokens if response.usage is not None else None
+        for response in responses
+    ] == [1, 1, 1, 1, 1]
+    assert checkpointer.ticks == 5
+
+
+async def test_compaction_rewrite_does_not_adopt_prior_producer_identity() -> None:
+    """A rewritten history is not a continuation just because it repeats text."""
+    bridge = task_bridge()
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    original_output = ModelOutput.from_content("mockllm/model", "working")
+    original_output.message.id = "native-output"
+    await bridge._track_state(first, original_output)
+
+    compacted: list[ChatMessage] = [
+        TASK_SYSTEM,
+        ChatMessageUser(content="Conversation summary"),
+    ]
+    compacted_output = ModelOutput.from_content("mockllm/model", "working")
+    compacted_output.message.id = "compacted-output"
+    await bridge._track_state(compacted, compacted_output)
+    continued: list[ChatMessage] = [
+        *compacted,
+        compacted_output.message,
+        ChatMessageUser(content="please continue"),
+    ]
+    await track(bridge, continued, "Castle")
+
+    assert bridge.state.messages[2] is compacted_output.message
+    assert bridge.state.messages[2].id == "compacted-output"
