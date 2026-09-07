@@ -54,6 +54,7 @@ from .util import (
     clear_generation_params,
     client_json_schema,
     client_request_object,
+    client_request_string,
     relax_tool_choice_for_withheld,
     resolve_generate_config,
     resolve_inspect_model,
@@ -67,13 +68,22 @@ logger = getLogger(__name__)
 
 async def inspect_google_api_request_impl(
     json_data: dict[str, Any],
+    headers: dict[str, str] | None,
     web_search_providers: WebSearchProviders | None,
     code_execution_providers: CodeExecutionProviders | None,
     bridge: AgentBridge,
+    *,
+    metadata_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     # resolve model
     bridge_model_name = str(json_data.get("model", "inspect"))
-    model = resolve_inspect_model(bridge_model_name, bridge.model_aliases, bridge.model)
+    model = resolve_inspect_model(
+        bridge_model_name,
+        bridge.model_aliases,
+        bridge.model,
+        model_resolver=bridge.model_resolver,
+        provider="google",
+    )
 
     # extract request components
     contents: list[dict[str, Any]] = json_data.get("contents", [])
@@ -81,9 +91,8 @@ async def inspect_google_api_request_impl(
         "systemInstruction", json_data.get("system_instruction")
     )
     google_tools: list[dict[str, Any]] | None = json_data.get("tools")
-    tool_config: dict[str, Any] | None = json_data.get(
-        "toolConfig", json_data.get("tool_config")
-    )
+    # client-controlled; validated by tool_choice_from_google_tool_config below
+    tool_config: Any = json_data.get("toolConfig", json_data.get("tool_config"))
     # client-controlled; validated by generate_config_from_google below
     generation_config: Any = json_data.get(
         "generationConfig", json_data.get("generation_config", {})
@@ -121,6 +130,7 @@ async def inspect_google_api_request_impl(
     if not bridge.forward_generation_config:
         clear_generation_params(config)
     validate_client_config(config)
+    config.extra_headers = headers
 
     # try to maintain id stability
     apply_message_ids(bridge, messages)
@@ -130,7 +140,14 @@ async def inspect_google_api_request_impl(
 
     # generate via bridge
     output, c_message = await bridge_generate(
-        bridge, model, messages, tools, tool_choice, config
+        bridge,
+        model,
+        messages,
+        tools,
+        tool_choice,
+        config,
+        requested_model=bridge_model_name,
+        metadata_headers=metadata_headers,
     )
     if c_message is not None:
         messages.append(c_message)
@@ -138,7 +155,7 @@ async def inspect_google_api_request_impl(
     debug_log("INSPECT OUTPUT", output.message)
 
     # update state if we have more messages than the last generation
-    await bridge._track_state(messages, output)
+    await bridge._track_state(messages, output, str(ModelName(model)))
 
     # translate response to Gemini format
     response = gemini_response_from_output(output, model.api.model_name)
@@ -286,13 +303,39 @@ def tools_from_google_tools(
 
 
 def tool_choice_from_google_tool_config(
-    tool_config: dict[str, Any] | None,
+    tool_config: Any,
 ) -> ToolChoice | None:
+    # `Any` rather than `dict[str, Any] | None`: the value is client-controlled
+    # JSON, so each container is guarded before it is dereferenced for a
+    # mistyped value to 400 rather than escape as a raw `AttributeError`.
+    tool_config = client_request_object(tool_config, "toolConfig")
     if not tool_config:
         return None
 
-    function_calling_config = tool_config.get("functionCallingConfig", {})
-    mode = function_calling_config.get("mode", "AUTO")
+    function_calling_config = (
+        client_request_object(
+            tool_config.get("functionCallingConfig", None),
+            "toolConfig.functionCallingConfig",
+        )
+        or {}
+    )
+    mode = function_calling_config.get("mode", None)
+    if mode is None:
+        mode = "AUTO"
+    mode = client_request_string(mode, "toolConfig.functionCallingConfig.mode")
+    allowed = function_calling_config.get("allowedFunctionNames", None)
+    if allowed is not None and not isinstance(allowed, list):
+        raise BridgePolicyError(
+            "invalid request field in bridged request "
+            "(toolConfig.functionCallingConfig.allowedFunctionNames: input should "
+            f"be an array, got {type(allowed).__name__})"
+        )
+    allowed_names = [
+        client_request_string(
+            name, f"toolConfig.functionCallingConfig.allowedFunctionNames.{i}"
+        )
+        for i, name in enumerate(allowed or [])
+    ]
 
     match mode:
         case "AUTO":
@@ -302,9 +345,8 @@ def tool_choice_from_google_tool_config(
         case "NONE":
             return "none"
         case _:
-            allowed = function_calling_config.get("allowedFunctionNames", [])
-            if allowed and len(allowed) == 1:
-                return ToolFunction(name=allowed[0])
+            if len(allowed_names) == 1:
+                return ToolFunction(name=allowed_names[0])
             return "auto"
 
 
@@ -690,6 +732,28 @@ def gemini_response_from_output(output: ModelOutput, model_name: str) -> dict[st
         "usageMetadata": gemini_usage_metadata(output.usage),
         "modelVersion": model_name,
     }
+
+    logprobs = output.choices[0].logprobs
+    if logprobs and logprobs.content:
+        candidate = response["candidates"][0]
+        candidate["logprobsResult"] = {
+            "chosenCandidates": [
+                {"token": token.token, "logProbability": token.logprob}
+                for token in logprobs.content
+            ],
+            "topCandidates": [
+                {
+                    "candidates": [
+                        {"token": top.token, "logProbability": top.logprob}
+                        for top in token.top_logprobs or []
+                    ]
+                }
+                for token in logprobs.content
+            ],
+        }
+        candidate["avgLogprobs"] = sum(
+            token.logprob for token in logprobs.content
+        ) / len(logprobs.content)
 
     # Add convenience text field if there's text content (excluding embedded <think> tags)
     text_content = "".join(

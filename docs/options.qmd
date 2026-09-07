@@ -67,7 +67,7 @@ For more detail on the different methods of configuration, see [Configuration](t
 |                    |                                              |
 |--------------------|----------------------------------------------|
 | `--model`          | Model used to evaluate tasks.                |
-| `--model-base-url` | Base URL for for model API                   |
+| `--model-base-url` | Base URL for model API                       |
 | `--model-config`   | Model specific arguments (JSON or YAML file) |
 | `-M`               | Model specific arguments (`key=value`).      |
 | `--model-spec`     | Model with its own generation config, model args, and base url (inline JSON or YAML, same fields as `--model-role`). Repeat for several models. Cannot be combined with the four options above, nor with the `model` field of `--run-config`. See [Multiple Models](models.qmd#multiple-models). |
@@ -203,6 +203,7 @@ For a complete matrix of which task, solver, and runtime settings can be configu
 | `--no-ansi` / `INSPECT_NO_ANSI` | Do not print ANSI control characters. |
 | `--approval` | Config file for tool call approval. |
 | `--env` | Set an environment variable (multiple instances of `--env` are permitted). |
+| `INSPECT_GC_MODE` | Opt-in operational garbage-collector policy. Values: `default`, `freeze`, `low_latency`. `low_latency` suppresses automatic full (generation-2) collections and requires a finite cgroup memory limit for its high-water guard. |
 | `--tags` | Tags to associate with this evaluation run. |
 | `--metadata` | Metadata to associate with this evaluation run (`key=value`) |
 | `--help` | Display help for command options. |
