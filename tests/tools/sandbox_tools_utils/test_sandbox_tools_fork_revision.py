@@ -49,10 +49,39 @@ def is_version_query(cmd: list[str]) -> bool:
     return cmd == [SANDBOX_CLI, "exec"]
 
 
+ROOT_CAPS = ExecResult(
+    success=True,
+    returncode=0,
+    stdout="Uid: 0 0 0 0\nCapEff: 000001ffffffffff\nsetgroups: allow\n",
+    stderr="",
+)
+"""Root capability probe: root can switch users, so the tools run as root."""
+
+DEFAULT_USER = ExecResult(
+    success=True,
+    returncode=0,
+    stdout="Uid: 1111\t1111\t1111\t1111\nGid: 1111\t1111\t1111\t1111\nGroups: 1111 \nHOME: /home/nonroot\nHOME_SET: 1\n",
+    stderr="",
+)
+"""Default-user identity probe."""
+
+
+def is_caps_probe(cmd: list[str]) -> bool:
+    return cmd[:2] == ["/bin/sh", "-c"] and "CapEff:" in cmd[2]
+
+
+def is_identity_probe(cmd: list[str]) -> bool:
+    return cmd[:2] == ["/bin/sh", "-c"] and "Groups:" in cmd[2]
+
+
 def wrong_fork_binary(cmd: list[str], user: str | None) -> ExecResult[str]:
     """Every helper call verifies and every command succeeds; only the build is foreign."""
     if is_framework_dir_call(cmd):
         return VERIFIED
+    if is_caps_probe(cmd):
+        return ROOT_CAPS
+    if is_identity_probe(cmd):
+        return DEFAULT_USER
     return WRONG_FORK_VERSION if is_version_query(cmd) else OK
 
 
