@@ -10,7 +10,11 @@ from inspect_ai._util.hash import mm3_hash
 from inspect_ai._util.json import to_json_str_safe
 from inspect_ai.agent._agent import AgentState
 from inspect_ai.log._condense import ATTACHMENT_PROTOCOL
-from inspect_ai.model._chat_message import ChatMessage, ChatMessageUser
+from inspect_ai.model._chat_message import (
+    ChatMessage,
+    ChatMessageAssistant,
+    ChatMessageUser,
+)
 from inspect_ai.model._compaction import (
     Compact,
     CompactionStrategy,
@@ -119,6 +123,7 @@ class AgentBridge:
         self._tracked_calls = 0
         self._tracked_descends: _Descent | None = None
         self._candidate_fps: list[_MessageFingerprint] | None = None
+        self._candidate_messages: list[ChatMessage] | None = None
         self._pending_operator = 0
         # accumulation state for _accumulate_conversation (see its docstring). Adopted on
         # ANY resume, unlike bridge_messages above: the scaffold replays only the
@@ -341,10 +346,14 @@ class AgentBridge:
             # a side call the rules below displace it later)
             self._adopt_thread(messages, output, fps, calls=1)
         elif _extends(self._tracked_fps, fps):
+            messages = _preserve_producer_messages(self.state.messages, messages)
             self._adopt_thread(messages, output, fps, calls=self._tracked_calls + 1)
         elif self._candidate_fps is not None and _extends(self._candidate_fps, fps):
             # the candidate got continued so it is a live agent loop (e.g. the
             # post-compaction conversation): promote it over the tracked thread
+            messages = _preserve_producer_messages(
+                self._candidate_messages or [], messages
+            )
             self._adopt_thread(messages, output, fps, calls=2)
         else:
             descends = self._descends_from_initial(messages, fps)
@@ -376,6 +385,7 @@ class AgentBridge:
                 self._adopt_thread(messages, output, fps, calls=1)
             else:
                 self._candidate_fps = fps
+                self._candidate_messages = messages
 
         self._last_message_count = len(messages)
 
@@ -441,6 +451,9 @@ class AgentBridge:
                     _Conversation(key=key, messages=messages, output=output)
                 )
         else:
+            messages = _preserve_producer_messages(
+                self._conversations[continued].messages, messages
+            )
             self._conversations[continued] = _Conversation(
                 key=key, messages=messages, output=output
             )
@@ -468,16 +481,33 @@ class AgentBridge:
         stability `apply_message_ids` exists to provide and breaks every consumer that
         joins on the id (`log/_condense.py`'s walk cache, `solver/_run.py`'s prefix diff,
         matching `sample.messages` back to `ModelEvent.input`).
+
+        When a synthetic carrier collides with a bridge-produced assistant message, retain
+        the producer id. The carrier is an independent input and may be re-identified; the
+        output id is the identity a later `ModelEvent` uses to establish authorship.
         """
         flattened: list[ChatMessage] = []
-        seen: set[str] = set()
-        for conversation in self._conversations:
+        seen: dict[str, tuple[int, int, int]] = {}
+        for conversation_index, conversation in enumerate(self._conversations):
             for position, message in enumerate(conversation.messages):
-                if message.id in seen:
-                    message = message.model_copy(update={"id": uuid()})
-                    conversation.messages[position] = message
+                if message.id is not None and (prior := seen.get(message.id)):
+                    prior_flattened, prior_conversation, prior_position = prior
+                    prior_message = flattened[prior_flattened]
+                    if _is_producer(message) and not _is_producer(prior_message):
+                        replacement_id = uuid()
+                        prior_message = prior_message.model_copy(
+                            update={"id": replacement_id}
+                        )
+                        self._conversations[prior_conversation].messages[
+                            prior_position
+                        ] = prior_message
+                        flattened[prior_flattened] = prior_message
+                        seen[replacement_id] = prior
+                    else:
+                        message = message.model_copy(update={"id": uuid()})
+                        conversation.messages[position] = message
                 if message.id is not None:
-                    seen.add(message.id)
+                    seen[message.id] = (len(flattened), conversation_index, position)
                 flattened.append(message)
         return flattened
 
@@ -500,6 +530,7 @@ class AgentBridge:
         self._tracked_calls = calls
         self._tracked_descends = self._descends_from_initial(messages, fps)
         self._candidate_fps = None
+        self._candidate_messages = None
 
     def _descends_from_initial(
         self, messages: list[ChatMessage], fps: list["_MessageFingerprint"]
@@ -591,6 +622,51 @@ def _conversation_message_fingerprint(
         role=message.role,
         identity_hash=mm3_hash(to_json_str_safe(message_identity)),
     )
+
+
+def _is_producer(message: ChatMessage) -> bool:
+    """Whether a message is a bridge model output with attribution authority."""
+    return isinstance(message, ChatMessageAssistant) and message.source == "generate"
+
+
+def _preserve_producer_messages(
+    previous: list[ChatMessage], messages: list[ChatMessage]
+) -> list[ChatMessage]:
+    """Reuse producer messages from an exactly continued non-system prefix.
+
+    Request conversion synthesizes inbound ids, source, and metadata. Those transport
+    fields cannot identify a continuation, so only semantic wire content participates.
+    Systems are also excluded because native CLIs may rewrite them per request. A mismatch
+    leaves the converted request untouched rather than inferring producer identity.
+    """
+    previous_non_system = [
+        (index, message)
+        for index, message in enumerate(previous)
+        if message.role != "system"
+    ]
+    message_non_system = [
+        (index, message)
+        for index, message in enumerate(messages)
+        if message.role != "system"
+    ]
+    if len(previous_non_system) > len(message_non_system):
+        return messages
+    if any(
+        _conversation_message_fingerprint(previous_message)
+        != _conversation_message_fingerprint(message)
+        for (_, previous_message), (_, message) in zip(
+            previous_non_system, message_non_system
+        )
+    ):
+        return messages
+
+    preserved = messages.copy()
+    for (_, previous_message), (message_index, _) in zip(
+        previous_non_system, message_non_system
+    ):
+        if _is_producer(previous_message):
+            preserved[message_index] = previous_message
+    return preserved
 
 
 class _MessageFingerprint(NamedTuple):

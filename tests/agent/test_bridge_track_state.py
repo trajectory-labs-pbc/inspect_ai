@@ -9,6 +9,7 @@ mode where a longer side call permanently displaced the real conversation.
 
 from typing import Any
 
+from pydantic import TypeAdapter
 from test_helpers.checkpoint import RecordingCheckpointer
 
 from inspect_ai._util.hash import mm3_hash
@@ -1419,13 +1420,14 @@ def scenario_model(completions: list[str]) -> Model:
     )
 
 
-async def test_completions_handler_tracks_main_thread_end_to_end() -> None:
+async def test_completions_handler_tracks_main_thread_and_preserves_producer_id() -> (
+    None
+):
     """The opencode scenario through the real OpenAI completions handler.
 
-    Exercises message conversion, system-prompt handling and message-id
-    assignment together with `_track_state`: `apply_message_ids` gives every
-    request fresh ids, so thread continuity must survive the full request
-    path, not just hand-constructed messages.
+    The mock model returns `ModelOutput` only, without a provider response id.
+    A second scaffold request therefore must retain the first bridge-produced
+    assistant object rather than its synthetic request-history copy.
     """
     model = scenario_model(
         ["Doctor Who Series 9 setting", "let me look into that", "Castle"]
@@ -1458,6 +1460,11 @@ async def test_completions_handler_tracks_main_thread_end_to_end() -> None:
     reply = await request(main)
     assert reply == "let me look into that"
     assert bridge.state.output.completion == "let me look into that"
+    producer = bridge.state.messages[-1]
+    assert isinstance(producer, ChatMessageAssistant)
+    assert producer.source == "generate"
+    producer_id = producer.id
+    assert producer_id is not None
 
     # main loop: turn 2 (scaffold round-trips through its own store)
     main = main + [
@@ -1474,6 +1481,79 @@ async def test_completions_handler_tracks_main_thread_end_to_end() -> None:
         "please continue",
         "Castle",
     ]
+    assert bridge.state.messages[2] is producer
+    assert bridge.state.messages[2].id == producer_id
+
+
+async def test_tracked_extension_preserves_producer_metadata_after_serialization() -> (
+    None
+):
+    """A continued request retains the known output, not its inbound carrier."""
+    bridge = task_bridge()
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    producer_output = ModelOutput.from_content("mockllm/model", "working")
+    producer_output.message.id = "native-output"
+    producer_output.message.metadata = {"native_event_id": "event-1"}
+    await bridge._track_state(first, producer_output)
+
+    carrier = ChatMessageAssistant(
+        content="working",
+        id="synthetic-history",
+        metadata={"request_id": "request-2"},
+    )
+    continued: list[ChatMessage] = [
+        *first,
+        carrier,
+        ChatMessageUser(content="please continue"),
+    ]
+    await track(bridge, continued, "Castle")
+
+    assert bridge.state.messages[2] is producer_output.message
+    serialized = TypeAdapter(list[ChatMessage]).dump_json(bridge.state.messages)
+    restored = TypeAdapter(list[ChatMessage]).validate_json(serialized)
+    assert restored[2].id == "native-output"
+    assert restored[2].metadata == {"native_event_id": "event-1"}
+
+
+async def test_tracked_extension_does_not_preserve_identity_when_tool_args_rewrite() -> (
+    None
+):
+    """Matching text is not enough to carry an output's producer identity."""
+    bridge = task_bridge()
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    producer_output = ModelOutput.for_tool_call(
+        "mockllm/model",
+        "read_file",
+        {"path": "/workspace/original.txt"},
+        tool_call_id="tool-1",
+    )
+    producer_output.message.id = "native-output"
+    producer_output.message.metadata = {"native_event_id": "event-1"}
+    await bridge._track_state(first, producer_output)
+
+    rewritten_call = ToolCall(
+        id="tool-1",
+        function="read_file",
+        arguments={"path": "/workspace/rewritten.txt"},
+    )
+    carrier = ChatMessageAssistant(
+        content=producer_output.message.text,
+        id="synthetic-history",
+        tool_calls=[rewritten_call],
+    )
+    continued: list[ChatMessage] = [
+        *first,
+        carrier,
+        ChatMessageTool(
+            content="rewritten contents",
+            tool_call_id=rewritten_call.id,
+            function=rewritten_call.function,
+        ),
+    ]
+    await track(bridge, continued, "Castle")
+
+    assert bridge.state.messages[2] is carrier
+    assert bridge.state.messages[2].id == "synthetic-history"
 
 
 async def test_anthropic_handler_tracks_main_thread_end_to_end() -> None:
@@ -1554,8 +1634,10 @@ def cc_system(nonce: int) -> ChatMessageSystem:
     )
 
 
-async def test_accumulation_keeps_distinct_tool_call_histories() -> None:
-    """Tool calls and results distinguish otherwise text-identical histories."""
+async def test_accumulation_keeps_same_model_children_with_distinct_tool_histories() -> (
+    None
+):
+    """Tool calls distinguish same-model children with otherwise identical text."""
     bridge = accumulating_bridge()
 
     def lookup_history(query: str) -> list[ChatMessage]:
@@ -1567,7 +1649,9 @@ async def test_accumulation_keeps_distinct_tool_call_histories() -> None:
         return [
             TASK_SYSTEM,
             ChatMessageUser(content="Find the castle."),
-            ChatMessageAssistant(content="", tool_calls=[call]),
+            ChatMessageAssistant(
+                content="", model="mockllm/native-child", tool_calls=[call]
+            ),
             ChatMessageTool(
                 content="lookup result",
                 tool_call_id=call.id,
@@ -1590,6 +1674,36 @@ async def test_accumulation_keeps_distinct_tool_call_histories() -> None:
         for message in bridge.state.messages
         if isinstance(message, ChatMessageTool)
     ] == ["lookup-A", "lookup-B"]
+
+
+async def test_accumulation_preserves_producer_identity_across_system_rewrite() -> None:
+    """A continued native CLI conversation keeps its first producer object."""
+    bridge = accumulating_bridge()
+    first: list[ChatMessage] = [cc_system(1), ChatMessageUser(content=TASK)]
+    producer_output = ModelOutput.from_content("mockllm/model", "working")
+    producer_output.message.id = "native-output"
+    producer_output.message.metadata = {"native_event_id": "event-1"}
+    await bridge._track_state(first, producer_output)
+
+    carrier = ChatMessageAssistant(
+        content="working",
+        id="synthetic-history",
+        metadata={"request_id": "request-2"},
+    )
+    continued: list[ChatMessage] = [
+        cc_system(2),
+        ChatMessageUser(content=TASK),
+        carrier,
+        ChatMessageTool(content="tool result"),
+    ]
+    await track(bridge, continued, "Castle")
+
+    producer = next(
+        message for message in bridge.state.messages if message.text == "working"
+    )
+    assert producer is producer_output.message
+    assert producer.id == "native-output"
+    assert producer.metadata == {"native_event_id": "event-1"}
 
 
 async def test_every_conversation_is_kept_not_just_the_main_one() -> None:
@@ -1735,6 +1849,28 @@ async def test_accumulated_message_ids_are_unique_and_stable() -> None:
     assert later[: len(first)] == first
 
 
+async def test_flattening_keeps_producer_identity_when_carrier_id_collides() -> None:
+    """Deduplicating independent conversations must re-id the carrier, not output."""
+    bridge = accumulating_bridge()
+    await track(
+        bridge,
+        [ChatMessageUser(content="unrelated carrier", id="native-output")],
+        "side result",
+    )
+
+    producer_output = ModelOutput.from_content("mockllm/model", "main result")
+    producer_output.message.id = "native-output"
+    await bridge._track_state(
+        [ChatMessageUser(content="main conversation")], producer_output
+    )
+
+    assert bridge.state.messages[-1] is producer_output.message
+    assert producer_output.message.id == "native-output"
+    assert len({message.id for message in bridge.state.messages}) == len(
+        bridge.state.messages
+    )
+
+
 async def test_accumulated_conversations_keep_first_seen_order() -> None:
     """A call resuming an earlier conversation does not move it to the end."""
     bridge = accumulating_bridge()
@@ -1796,3 +1932,29 @@ async def test_accumulated_conversations_survive_a_resume() -> None:
     assert "session one answer" in texts
     assert texts.count("session two answer") == 1
     assert texts[-1] == "session two continues"
+
+
+async def test_compaction_rewrite_does_not_adopt_prior_producer_identity() -> None:
+    """A rewritten history is not a continuation just because it repeats text."""
+    bridge = task_bridge()
+    first: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    original_output = ModelOutput.from_content("mockllm/model", "working")
+    original_output.message.id = "native-output"
+    await bridge._track_state(first, original_output)
+
+    compacted: list[ChatMessage] = [
+        TASK_SYSTEM,
+        ChatMessageUser(content="Conversation summary"),
+    ]
+    compacted_output = ModelOutput.from_content("mockllm/model", "working")
+    compacted_output.message.id = "compacted-output"
+    await bridge._track_state(compacted, compacted_output)
+    continued: list[ChatMessage] = [
+        *compacted,
+        compacted_output.message,
+        ChatMessageUser(content="please continue"),
+    ]
+    await track(bridge, continued, "Castle")
+
+    assert bridge.state.messages[2] is compacted_output.message
+    assert bridge.state.messages[2].id == "compacted-output"
