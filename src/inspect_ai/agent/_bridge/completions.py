@@ -9,21 +9,25 @@ from shortuuid import uuid
 from inspect_ai.agent._bridge.types import AgentBridge
 from inspect_ai.model._chat_message import ChatMessageSystem
 from inspect_ai.model._generate_config import GenerateConfig
+from inspect_ai.model._model import ModelName
 from inspect_ai.model._openai_convert import messages_from_openai
 from inspect_ai.model._providers.providers import validate_openai_client
 from inspect_ai.tool._tool_choice import ToolChoice, ToolFunction
 from inspect_ai.tool._tool_info import ToolInfo
 from inspect_ai.tool._tool_params import ToolParams
 
+from ._errors import BridgePolicyError
 from .util import (
     apply_message_ids,
     bridge_generate,
     clear_generation_params,
     client_json_schema,
     client_request_object,
+    client_request_string,
     client_response_schema,
     resolve_generate_config,
     resolve_inspect_model,
+    tool_choice_from_openai_string,
     validate_bridge_media,
     validate_client_config,
 )
@@ -31,7 +35,6 @@ from .util import (
 if TYPE_CHECKING:
     from openai.types.chat import (
         ChatCompletion,
-        ChatCompletionToolChoiceOptionParam,
         ChatCompletionToolParam,
     )
 
@@ -43,6 +46,8 @@ async def inspect_completions_api_request(
     json_data: dict[str, Any],
     headers: dict[str, str] | None,
     bridge: AgentBridge,
+    *,
+    metadata_headers: dict[str, str] | None = None,
 ) -> "ChatCompletion":
     validate_openai_client("agent bridge")
 
@@ -57,7 +62,13 @@ async def inspect_completions_api_request(
     )
 
     bridge_model_name = str(json_data["model"])
-    model = resolve_inspect_model(bridge_model_name, bridge.model_aliases, bridge.model)
+    model = resolve_inspect_model(
+        bridge_model_name,
+        bridge.model_aliases,
+        bridge.model,
+        model_resolver=bridge.model_resolver,
+        provider="openai",
+    )
     model_name = model.api.model_name
 
     # convert openai messages to inspect messages
@@ -81,23 +92,29 @@ async def inspect_completions_api_request(
     # read openai tools and tool choice
     openai_tools: list[ChatCompletionToolParam] = json_data.get("tools", [])
     tools = tools_from_openai_tools(openai_tools)
-    openai_tool_choice: ChatCompletionToolChoiceOptionParam | None = json_data.get(
-        "tool_choice", None
+    tool_choice = tool_choice_from_openai_tool_choice(
+        json_data.get("tool_choice", None)
     )
-    tool_choice = tool_choice_from_openai_tool_choice(openai_tool_choice)
 
     # give inspect-level config priority over agent default config
     config = resolve_generate_config(model, config)
 
     # if there is a bridge filter give it a shot first
     output, c_message = await bridge_generate(
-        bridge, model, messages, tools, tool_choice, config
+        bridge,
+        model,
+        messages,
+        tools,
+        tool_choice,
+        config,
+        requested_model=bridge_model_name,
+        metadata_headers=metadata_headers,
     )
     if c_message is not None:
         messages.append(c_message)
 
     # update state if we have more messages than the last generation
-    await bridge._track_state(messages, output)
+    await bridge._track_state(messages, output, str(ModelName(model)))
 
     # inspect completion to openai completion
     return ChatCompletion(
@@ -111,21 +128,33 @@ async def inspect_completions_api_request(
 
 
 def tool_choice_from_openai_tool_choice(
-    tool_choice: "ChatCompletionToolChoiceOptionParam" | None,
+    tool_choice: Any,
 ) -> ToolChoice | None:
-    inspect_tool_choice: ToolChoice | None = None
-    if tool_choice is not None:
-        match tool_choice:
-            case "auto" | "none":
-                inspect_tool_choice = tool_choice
-            case "required":
-                inspect_tool_choice = "any"
-            case _:
-                assert tool_choice["type"] == "function", (
-                    '"custom" tool calls are not supported'
-                )
-                inspect_tool_choice = ToolFunction(name=tool_choice["function"]["name"])
-    return inspect_tool_choice
+    # `Any` rather than `ChatCompletionToolChoiceOptionParam`: the value is
+    # client-controlled JSON, so its shape is guarded before the first subscript
+    # for a mistyped value to 400 rather than escape as a raw `TypeError`/`KeyError`.
+    if tool_choice is None:
+        return None
+    if isinstance(tool_choice, str):
+        return tool_choice_from_openai_string(tool_choice, "tool_choice")
+    tool_choice = client_request_object(tool_choice, "tool_choice")
+    tool_type = tool_choice.get("type", None)
+    if tool_type != "function":
+        # `custom` and `allowed_tools` are valid API values the bridge does not
+        # translate; previously a bare `assert` (status-less `AssertionError`).
+        raise BridgePolicyError(
+            "invalid request field in bridged request (tool_choice.type: only "
+            f"'function' is supported by the agent bridge, got {tool_type!r})"
+        )
+    function = (
+        client_request_object(tool_choice.get("function", None), "tool_choice.function")
+        or {}
+    )
+    return ToolFunction(
+        name=client_request_string(
+            function.get("name", None), "tool_choice.function.name"
+        )
+    )
 
 
 def tools_from_openai_tools(tools: "list[ChatCompletionToolParam]") -> list[ToolInfo]:
