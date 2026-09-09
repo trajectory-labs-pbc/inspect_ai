@@ -1,5 +1,6 @@
 import asyncio
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,7 +10,7 @@ from test_helpers.utils import skip_if_no_docker
 from inspect_ai import Task, eval
 from inspect_ai.agent import sandbox_agent_bridge
 from inspect_ai.dataset import Sample
-from inspect_ai.model import GenerateConfig, get_model
+from inspect_ai.model import ChatMessage, GenerateConfig, get_model
 from inspect_ai.solver import Solver, solver
 from inspect_ai.util import sandbox
 
@@ -107,3 +108,38 @@ def test_sandbox_bridge_cannot_read_host_media(tmp_path: Path) -> None:
         assert secret_bytes.decode() not in serialized_requests
     finally:
         asyncio.run(target_model.api.aclose())
+
+
+@skip_if_no_docker
+@pytest.mark.slow
+def test_sandbox_agent_bridge_forwards_state_filter(tmp_path: Path) -> None:
+    """The public context manager forwards state filtering to its bridge."""
+
+    def state_filter(_messages: Sequence[ChatMessage]) -> bool:
+        return True
+
+    @solver
+    def bridge_solver() -> Solver:
+        async def solve(state, generate):
+            async with sandbox_agent_bridge(state_filter=state_filter) as bridge:
+                state.metadata["state_filter_forwarded"] = (
+                    bridge.state_filter is state_filter
+                )
+            return state
+
+        return solve
+
+    logs = eval(
+        Task(
+            dataset=[Sample(id="sample", input="test")],
+            solver=bridge_solver(),
+            sandbox="docker",
+        ),
+        model="mockllm/model",
+        display="none",
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    assert logs[0].status == "success", logs[0].error
+    assert logs[0].samples is not None
+    assert logs[0].samples[0].metadata["state_filter_forwarded"] is True
