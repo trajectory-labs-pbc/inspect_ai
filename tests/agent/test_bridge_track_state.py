@@ -3295,6 +3295,43 @@ async def track_with_tool_call(
     return event
 
 
+async def test_an_echo_with_reordered_argument_keys_continues_its_conversation() -> None:
+    """A tool call echoed with its argument keys in another order is the same turn.
+
+    JSON objects are unordered. The antigravity CLI re-serialises each reply's
+    `tool_calls[].arguments` when it echoes the turn, with the keys in another
+    order; hashing them in arrival order opened a new conversation at every turn
+    (71 spans for a run whose CLI declared 3). A different argument VALUE is
+    still a different turn.
+    """
+    init_transcript(Transcript())
+    bridge = accumulating_bridge()
+    one: list[ChatMessage] = [TASK_SYSTEM, ChatMessageUser(content=TASK)]
+    await track_with_tool_call(
+        bridge,
+        one,
+        ToolCall(id="call_1", function="run", arguments={"Cwd": "/w", "Cmd": "ls"}),
+    )
+
+    def echo(arguments: dict[str, Any]) -> list[ChatMessage]:
+        return [
+            *one,
+            ChatMessageAssistant(
+                content="tool call for tool run",
+                tool_calls=[
+                    ToolCall(id="call_run_echo", function="run", arguments=arguments)
+                ],
+            ),
+            ChatMessageTool(content="GEMINI.md", tool_call_id="call_run_echo"),
+        ]
+
+    await track(bridge, echo({"Cmd": "ls", "Cwd": "/w"}), "done")
+    assert len(bridge._conversations) == 1
+
+    await track(bridge, echo({"Cmd": "ls -la", "Cwd": "/w"}), "done")
+    assert len(bridge._conversations) == 2
+
+
 async def test_identical_parallel_sub_agents_share_a_conversation_until_they_diverge() -> (
     None
 ):
