@@ -30,7 +30,14 @@ from anthropic.types.beta import (
 )
 from shortuuid import uuid
 
-from inspect_ai._util.content import Content, ContentDocument, ContentImage, ContentText
+from inspect_ai._util.content import (
+    Content,
+    ContentDocument,
+    ContentImage,
+    ContentReasoning,
+    ContentText,
+)
+from inspect_ai._util.hash import mm3_hash
 from inspect_ai._util.images import as_data_uri
 from inspect_ai.model._chat_message import (
     ChatMessage,
@@ -52,6 +59,7 @@ from inspect_ai.model._providers.anthropic import (
     AnthropicAPI,
     ToolParamDef,
     anthropic_extra_body_fields,
+    assistant_internal,
     assistant_message_blocks,
     content_and_tool_calls_from_assistant_content_blocks,
     is_bash_tool,
@@ -205,7 +213,9 @@ async def inspect_anthropic_api_request_impl(
     message_class = BetaMessage if beta else Message
     message = message_class.model_construct(
         id=output.message.id or uuid(),
-        content=await assistant_message_blocks(output.message, beta=beta),
+        content=await assistant_message_blocks(
+            scaffold_assistant_message(output.message), beta=beta
+        ),
         model=output.model,
         role="assistant",
         stop_reason=anthropic_stop_reason(output.stop_reason),
@@ -519,6 +529,65 @@ def tool_choice_from_anthropic_tool_choice(
             )
 
 
+# Prefix of a thinking block signature that carries another provider's
+# reasoning block (see `scaffold_assistant_message`).
+FOREIGN_REASONING_PREFIX = "inspect-foreign-reasoning-v1:"
+
+
+def scaffold_assistant_message(message: ChatMessageAssistant) -> ChatMessageAssistant:
+    """Prepare a model output to be returned to an Anthropic API scaffold.
+
+    Anthropic thinking blocks only describe reasoning from Anthropic models.
+    Reasoning from other providers (e.g. a Gemini `thought_signature`, which
+    must be sent back with the function call it belongs to) would otherwise be
+    written as plain text and lost when the scaffold sends its history back.
+    Each such block is instead carried in a thinking block: its readable text
+    (if any) as the thinking and the whole block, serialized, as the
+    signature. Scaffolds echo thinking blocks verbatim, and
+    `restore_foreign_reasoning` turns them back into the original block.
+    """
+    if isinstance(message.content, str):
+        return message
+    content = [
+        _foreign_reasoning_carrier(c)
+        if isinstance(c, ContentReasoning) and not _is_anthropic_reasoning(c)
+        else c
+        for c in message.content
+    ]
+    return message.model_copy(update={"content": content})
+
+
+def restore_foreign_reasoning(content: Content) -> Content:
+    """Restore a reasoning block carried by `scaffold_assistant_message`."""
+    if (
+        isinstance(content, ContentReasoning)
+        and content.redacted
+        and content.reasoning.startswith(FOREIGN_REASONING_PREFIX)
+    ):
+        try:
+            encoded = content.reasoning.removeprefix(FOREIGN_REASONING_PREFIX)
+            return ContentReasoning.model_validate_json(base64.b64decode(encoded))
+        except ValueError:
+            logger.warning("Unable to restore reasoning carried in a thinking block.")
+    return content
+
+
+def _is_anthropic_reasoning(content: ContentReasoning) -> bool:
+    # every thinking block received from Anthropic (as a model response or
+    # as scaffold history) is recorded for replay
+    return mm3_hash(content.reasoning) in assistant_internal().thinking_blocks
+
+
+def _foreign_reasoning_carrier(content: ContentReasoning) -> ContentReasoning:
+    serialized = content.model_dump_json(exclude_none=True).encode()
+    signature = FOREIGN_REASONING_PREFIX + base64.b64encode(serialized).decode()
+    readable = content.summary if content.redacted else content.reasoning
+    # rendered as ThinkingBlockParam(thinking=summary, signature=reasoning). a
+    # thinking block (rather than redacted_thinking) is used even when there
+    # is no readable text, as it is the block every scaffold handles.
+    return ContentReasoning(reasoning=signature, summary=readable or "", redacted=True)
+
+
 async def messages_from_anthropic_input(
     input: list[MessageParam], tools: list[ToolInfo | Tool]
 ) -> list[ChatMessage]:
@@ -548,6 +617,9 @@ async def messages_from_anthropic_input(
                     param_content, tools_info
                 )
             )
+            assistant_content = [
+                restore_foreign_reasoning(content) for content in assistant_content
+            ]
             messages.append(
                 ChatMessageAssistant(content=assistant_content, tool_calls=tool_calls)
             )
