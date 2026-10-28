@@ -1689,6 +1689,192 @@ def test_bridge_filter_generated_event_records_requested_name() -> None:
     ]
 
 
+# --- model_event_metadata_headers: client headers recorded on model events
+
+_SESSION_HEADERS = ["X-Claude-Code-Session-Id", "x-claude-code-agent-id"]
+
+
+def _recording_bridge(state: AgentState) -> AgentBridge:
+    from inspect_ai.agent._bridge.sandbox.types import SandboxAgentBridge
+
+    return SandboxAgentBridge(
+        state=state,
+        filter=None,
+        retry_refusals=None,
+        compaction=None,
+        port=13131,
+        model=None,
+        model_event_metadata_headers=_SESSION_HEADERS,
+    )
+
+
+def _service_request(
+    dialect: Literal["completions", "responses", "anthropic"],
+    headers: dict[str, str] | None,
+) -> Callable[[AgentBridge], Awaitable[object]]:
+    """Send one request the way the sandbox proxy does (`run_model_service`)."""
+    from inspect_ai.agent._bridge.sandbox import service
+    from inspect_ai.agent._bridge.sandbox.types import SandboxAgentBridge
+
+    async def send(bridge: AgentBridge) -> object:
+        assert isinstance(bridge, SandboxAgentBridge)
+        match dialect:
+            case "completions":
+                return await service.generate_completions(bridge)(
+                    {
+                        "model": "inspect",
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                    headers,
+                )
+            case "responses":
+                return await service.generate_responses(None, None, bridge)(
+                    {"model": "inspect", "input": "hi"}, headers
+                )
+            case "anthropic":
+                return await service.generate_anthropic(None, None, bridge)(
+                    {
+                        "model": "inspect",
+                        "max_tokens": 64,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                    headers,
+                )
+
+    return send
+
+
+@pytest.mark.parametrize("dialect", ["completions", "responses", "anthropic"])
+def test_sandbox_bridge_records_listed_request_headers(
+    dialect: Literal["completions", "responses", "anthropic"], tmp_path: Path
+) -> None:
+    from inspect_ai.log import read_eval_log
+    from inspect_ai.model import BRIDGE_REQUEST_HEADERS
+
+    send = _service_request(
+        dialect,
+        {
+            "x-claude-code-session-id": "session-1",
+            "x-claude-code-agent-id": "agent-1",
+            "x-unlisted": "not recorded",
+            "accept-encoding": "gzip",
+        },
+    )
+
+    @solver
+    def bridged_request() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            await send(_recording_bridge(AgentState(messages=state.messages)))
+            return state
+
+        return solve
+
+    log = eval(
+        Task(dataset=[Sample(input="hi")], solver=bridged_request()),
+        model="mockllm/model",
+        log_dir=str(tmp_path),
+    )[0]
+    assert log.status == "success", log.error
+
+    # as written to the log, not only as held in memory
+    samples = read_eval_log(log.location).samples
+    assert samples
+    [event] = [e for e in samples[0].events if isinstance(e, ModelEvent)]
+    assert event.metadata == {
+        BRIDGE_REQUEST_HEADERS: {
+            "x-claude-code-session-id": "session-1",
+            "x-claude-code-agent-id": "agent-1",
+        }
+    }
+
+
+def test_sandbox_bridge_records_no_metadata_without_listed_headers() -> None:
+    events = _bridged_model_events(
+        _service_request("completions", {"x-unlisted": "1"}), _recording_bridge
+    )
+    assert [e.metadata for e in events] == [None]
+
+
+def test_sandbox_bridge_records_each_concurrent_requests_own_headers() -> None:
+    from inspect_ai._util._async import tg_collect
+    from inspect_ai.model import BRIDGE_REQUEST_HEADERS
+
+    async def send(bridge: AgentBridge) -> object:
+        return await tg_collect(
+            [
+                lambda: _service_request(
+                    "completions", {"x-claude-code-session-id": "main"}
+                )(bridge),
+                lambda: _service_request(
+                    "anthropic",
+                    {
+                        "x-claude-code-session-id": "main",
+                        "x-claude-code-agent-id": "subagent",
+                    },
+                )(bridge),
+                lambda: _service_request("responses", None)(bridge),
+            ]
+        )
+
+    events = _bridged_model_events(send, _recording_bridge)
+    recorded = [(e.metadata or {}).get(BRIDGE_REQUEST_HEADERS) for e in events]
+    assert sorted(recorded, key=str) == sorted(
+        [
+            {"x-claude-code-session-id": "main"},
+            {
+                "x-claude-code-session-id": "main",
+                "x-claude-code-agent-id": "subagent",
+            },
+            None,
+        ],
+        key=str,
+    )
+
+
+def test_model_event_metadata_nests_and_restores() -> None:
+    from inspect_ai.model._model import (
+        _current_model_event_metadata,
+        model_event_metadata,
+    )
+
+    with model_event_metadata({"a": 1, "b": {"x": 1}}):
+        with model_event_metadata({"b": {"y": 2}}):
+            assert _current_model_event_metadata() == {"a": 1, "b": {"y": 2}}
+        outer = _current_model_event_metadata()
+        assert outer == {"a": 1, "b": {"x": 1}}
+        # each event gets its own copy
+        assert outer is not None
+        outer["b"]["x"] = 2
+        assert _current_model_event_metadata() == {"a": 1, "b": {"x": 1}}
+    assert _current_model_event_metadata() is None
+
+
+def test_sandbox_bridge_headers_do_not_outlive_a_failed_request() -> None:
+    from inspect_ai.model import BRIDGE_REQUEST_HEADERS
+
+    def failing_filter(*args: Any) -> Any:
+        raise RuntimeError("filter failed")
+
+    async def send(bridge: AgentBridge) -> object:
+        bridge.filter = failing_filter
+        with pytest.raises(RuntimeError, match="filter failed"):
+            await _service_request(
+                "completions", {"x-claude-code-session-id": "failed"}
+            )(bridge)
+        bridge.filter = None
+        await _service_request("completions", {"x-claude-code-session-id": "next"})(
+            bridge
+        )
+        # a call made after the requests, in the same task, is not labelled
+        return await get_model().generate("hi")
+
+    events = _bridged_model_events(send, _recording_bridge)
+    assert [(e.metadata or {}).get(BRIDGE_REQUEST_HEADERS) for e in events] == [
+        {"x-claude-code-session-id": "next"},
+        None,
+    ]
+
+
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_bridge_filter_style_detected_per_filter() -> None:
     """Each filter gets a `Model` or a name by its own signature.

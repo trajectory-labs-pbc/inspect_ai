@@ -73,6 +73,7 @@ async def sandbox_agent_bridge(
     checkpointer: Checkpointer | None = None,
     forward_client_headers: Mapping[str, Sequence[str]] | None = None,
     response_filter: ModelResponseFilter | None = None,
+    model_event_metadata_headers: Sequence[str] | None = None,
 ) -> AsyncIterator[SandboxAgentBridge]:
     """Sandbox agent bridge.
 
@@ -203,6 +204,21 @@ async def sandbox_agent_bridge(
         response_filter: Filter that can replace model output after generation
             (see ``ModelResponseFilter``). Return ``None`` to pass through;
             return a ``ModelOutput`` to replace the response.
+        model_event_metadata_headers: Client request headers to record in the
+            log, e.g. `["x-claude-code-session-id"]` to group an agent's model
+            calls by the session it declares. When a request carries any of
+            them, the model event of every call made while serving it has
+            `metadata["bridge_request_headers"]` (`BRIDGE_REQUEST_HEADERS`):
+            a mapping of the lowercase name to the value the agent sent (values
+            over 256 characters are not recorded). The values are the agent's
+            own claim, not verified. Recording a header does not forward it to
+            the model provider (see `forward_client_headers`). Names are
+            case-insensitive; names that may carry a credential (containing
+            `auth`, `bearer`, `cookie`, `credential`, `dpop`, `jwt`, `key`,
+            `password`, `secret`, `signature` or `token`) cannot be listed.
+            Defaults to `None`: no client header is recorded. Requests in the
+            Google API format carry no client headers, so nothing is recorded
+            for them.
     """
     warn_sentinel_bridged()
 
@@ -251,6 +267,7 @@ async def sandbox_agent_bridge(
                 allow_remote_mcp=allow_remote_mcp,
                 forward_client_headers=forward_client_headers,
                 response_filter=response_filter,
+                model_event_metadata_headers=model_event_metadata_headers,
             )
 
             # register bridged tools with the bridge

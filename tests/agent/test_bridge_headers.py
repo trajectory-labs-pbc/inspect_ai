@@ -23,7 +23,9 @@ from inspect_ai.agent._bridge.bridge import (
     _BLOCKED_BRIDGE_HEADERS,
     filter_bridge_headers,
     filter_sandbox_client_headers,
+    model_event_metadata_from_headers,
     resolve_forward_client_headers,
+    resolve_model_event_metadata_headers,
 )
 from inspect_ai.agent._bridge.sandbox.service import (
     generate_anthropic,
@@ -32,7 +34,8 @@ from inspect_ai.agent._bridge.sandbox.service import (
 )
 from inspect_ai.agent._bridge.sandbox.types import SandboxAgentBridge
 from inspect_ai.agent._bridge.util import merge_extra_headers
-from inspect_ai.model import GenerateConfig, get_model
+from inspect_ai.event import ModelEvent
+from inspect_ai.model import BRIDGE_REQUEST_HEADERS, GenerateConfig, get_model
 from inspect_ai.tool._tools._code_execution import CodeExecutionProviders
 from inspect_ai.tool._tools._web_search._web_search import WebSearchProviders
 
@@ -1090,3 +1093,247 @@ class TestSandboxRoutesKeepHostCredentials:
 
         [request] = requests
         self._assert_host_credentials(request, {"authorization": "Bearer host-key"})
+
+
+class TestModelEventMetadataHeaders:
+    """`model_event_metadata_headers` records client headers in the log only."""
+
+    def test_names_are_lowercased_and_stripped(self) -> None:
+        assert resolve_model_event_metadata_headers(
+            [" X-Claude-Code-Session-Id ", "x-claude-code-agent-id"]
+        ) == frozenset({"x-claude-code-session-id", "x-claude-code-agent-id"})
+
+    def test_none_records_nothing(self) -> None:
+        assert resolve_model_event_metadata_headers(None) == frozenset()
+
+    @pytest.mark.parametrize("option", ["x-session-id", {"x-session-id": "1"}, 3])
+    def test_rejects_non_list(self, option: Any) -> None:
+        with pytest.raises(TypeError, match="model_event_metadata_headers"):
+            resolve_model_event_metadata_headers(option)
+
+    def test_rejects_non_string_name(self) -> None:
+        with pytest.raises(TypeError, match="model_event_metadata_headers"):
+            resolve_model_event_metadata_headers(["x-session-id", cast(str, 1)])
+
+    @pytest.mark.parametrize("name", ["", "  ", "x session", "x-session:", "x-é"])
+    def test_rejects_invalid_header_names(self, name: str) -> None:
+        with pytest.raises(ValueError, match="not a valid HTTP header name"):
+            resolve_model_event_metadata_headers([name])
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "Authorization",
+            "Proxy-Authorization",
+            "x-api-key",
+            "api-key",
+            "x-goog-api-key",
+            "Cookie",
+            "X-Amz-Security-Token",
+            "x-oauth-client",
+            "x-client-secret",
+            "x-password",
+            "x-credentials",
+            "x-claude-code-signature",
+            "DPoP",
+            "x-jwt-assertion",
+            "x-bearer",
+        ],
+    )
+    def test_rejects_credential_like_names(self, name: str) -> None:
+        with pytest.raises(ValueError, match="may carry a credential"):
+            resolve_model_event_metadata_headers([name])
+
+    def test_sandbox_bridge_validates_the_option(self) -> None:
+        with pytest.raises(ValueError, match="may carry a credential"):
+            SandboxAgentBridge(
+                state=AgentState(messages=[]),
+                filter=None,
+                retry_refusals=None,
+                compaction=None,
+                port=13131,
+                model=None,
+                model_event_metadata_headers=["authorization"],
+            )
+
+    def test_selects_listed_headers_by_lowercase_name(self) -> None:
+        assert model_event_metadata_from_headers(
+            {
+                "X-Claude-Code-Session-Id": "session-1",
+                "x-unlisted": "not recorded",
+                "authorization": "Bearer sandbox-token",
+            },
+            frozenset({"x-claude-code-session-id", "x-claude-code-agent-id"}),
+        ) == {BRIDGE_REQUEST_HEADERS: {"x-claude-code-session-id": "session-1"}}
+
+    @pytest.mark.parametrize(
+        "headers",
+        [None, ["x-session-id"], {}, {"x-other": "1"}, {"x-session-id": 1}],
+    )
+    def test_records_nothing_without_a_listed_string_header(
+        self, headers: object
+    ) -> None:
+        assert (
+            model_event_metadata_from_headers(headers, frozenset({"x-session-id"}))
+            == {}
+        )
+
+    def test_long_values_are_not_recorded(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        assert model_event_metadata_from_headers(
+            {"x-session-id": "s" * 257, "x-agent-id": "a" * 256},
+            frozenset({"x-session-id", "x-agent-id"}),
+        ) == {BRIDGE_REQUEST_HEADERS: {"x-agent-id": "a" * 256}}
+        assert "'x-session-id' header" in caplog.text
+
+    def test_recorded_header_is_not_reported_as_unforwarded(self) -> None:
+        bridge_module._logged_client_header_drops.clear()
+        assert (
+            filter_sandbox_client_headers(
+                {"x-session-id": "1", "x-other": "2"},
+                {},
+                frozenset({"x-session-id"}),
+            )
+            is None
+        )
+        drops = _logged_drops()
+        assert not any("'x-session-id'" in m for m in drops)
+        assert any("'x-other'" in m for m in drops)
+
+    @pytest.mark.anyio
+    async def test_header_listed_in_both_options_is_forwarded_and_recorded(
+        self,
+    ) -> None:
+        requests: list[httpx2.Request] = []
+        events: list[ModelEvent] = []
+
+        class CaptureSink:
+            def on_pending(self, event: ModelEvent) -> None:
+                events.append(event)
+
+            def on_complete(self, event: ModelEvent) -> None:
+                pass
+
+        model = get_model(
+            "anthropic/claude-sonnet-4-5",
+            api_key="host-key",
+            memoize=False,
+            streaming=False,
+            config=GenerateConfig(max_tokens=64),
+            http_client=_capturing_client(
+                requests,
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            ),
+        )
+        bridge = SandboxAgentBridge(
+            state=AgentState(messages=[]),
+            filter=None,
+            retry_refusals=None,
+            compaction=None,
+            port=13131,
+            model=None,
+            model_aliases={"agent-model": model},
+            model_event_sink=CaptureSink(),
+            forward_client_headers={"x-feature": ["on"]},
+            model_event_metadata_headers=["x-feature"],
+        )
+        try:
+            await generate_anthropic(
+                cast(WebSearchProviders, None),
+                cast(CodeExecutionProviders, None),
+                bridge,
+            )(
+                {
+                    "model": "agent-model",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                {"x-feature": "on"},
+            )
+        finally:
+            await model.api.aclose()
+
+        [request] = requests
+        assert request.headers["x-feature"] == "on"
+        [event] = events
+        assert event.metadata == {BRIDGE_REQUEST_HEADERS: {"x-feature": "on"}}
+
+    @pytest.mark.anyio
+    async def test_recorded_header_is_not_sent_to_the_provider(self) -> None:
+        requests: list[httpx2.Request] = []
+        events: list[ModelEvent] = []
+
+        class CaptureSink:
+            def on_pending(self, event: ModelEvent) -> None:
+                events.append(event)
+
+            def on_complete(self, event: ModelEvent) -> None:
+                pass
+
+        model = get_model(
+            "anthropic/claude-sonnet-4-5",
+            api_key="host-key",
+            memoize=False,
+            streaming=False,
+            config=GenerateConfig(max_tokens=64),
+            http_client=_capturing_client(
+                requests,
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            ),
+        )
+        bridge = SandboxAgentBridge(
+            state=AgentState(messages=[]),
+            filter=None,
+            retry_refusals=None,
+            compaction=None,
+            port=13131,
+            model=None,
+            model_aliases={"agent-model": model},
+            model_event_sink=CaptureSink(),
+            model_event_metadata_headers=["x-claude-code-session-id"],
+        )
+        try:
+            await generate_anthropic(
+                cast(WebSearchProviders, None),
+                cast(CodeExecutionProviders, None),
+                bridge,
+            )(
+                {
+                    "model": "agent-model",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                {
+                    "x-claude-code-session-id": "session-1",
+                    "authorization": "Bearer sandbox-token",
+                },
+            )
+        finally:
+            await model.api.aclose()
+
+        [request] = requests
+        assert "x-claude-code-session-id" not in request.headers
+        assert request.headers.get_list("authorization") == ["Bearer host-key"]
+        [event] = events
+        assert event.metadata == {
+            BRIDGE_REQUEST_HEADERS: {"x-claude-code-session-id": "session-1"}
+        }

@@ -16,6 +16,7 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Final,
     Iterator,
     Literal,
     Mapping,
@@ -2075,6 +2076,7 @@ class Model:
             role=self.role,
             requested_model=_requested_model.get(),
             origin=current_origin(),
+            metadata=_current_model_event_metadata(),
             input=snapshot,
             tools=tools,
             tool_choice=tool_choice,
@@ -3235,6 +3237,43 @@ def requested_model(name: str) -> Iterator[None]:
         yield
     finally:
         _requested_model.reset(token)
+
+
+BRIDGE_REQUEST_HEADERS: Final = "bridge_request_headers"
+"""`ModelEvent.metadata` key: client request headers recorded by an agent bridge.
+
+A mapping of lower-case header name to value. Present only on the model events
+of calls made while `sandbox_agent_bridge()` serves a request that carried at
+least one of the headers named in its `model_event_metadata_headers` option, and
+holding only those. The values are what the sandboxed agent sent, unverified.
+"""
+
+_model_event_metadata: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_model_event_metadata", default=None
+)
+
+
+@contextlib.contextmanager
+def model_event_metadata(metadata: Mapping[str, Any]) -> Iterator[None]:
+    """Add `metadata` to `ModelEvent.metadata` for every generation in the block.
+
+    Nested blocks are merged, the inner value winning for a key both set.
+
+    Not part of the public API.
+    """
+    token = _model_event_metadata.set(
+        {**(_model_event_metadata.get() or {}), **metadata}
+    )
+    try:
+        yield
+    finally:
+        _model_event_metadata.reset(token)
+
+
+def _current_model_event_metadata() -> dict[str, Any] | None:
+    """A copy of the active `model_event_metadata()`, so events share no state."""
+    metadata = _model_event_metadata.get()
+    return deepcopy(metadata) if metadata else None
 
 
 # shared contexts for asyncio tasks

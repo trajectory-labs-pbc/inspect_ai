@@ -1,3 +1,4 @@
+from contextlib import AbstractContextManager, nullcontext
 from logging import getLogger  # noqa: E402
 from typing import Awaitable, Callable, Protocol, cast
 
@@ -5,7 +6,7 @@ import anyio
 from pydantic import JsonValue
 
 from inspect_ai.model._call_tools import get_tools_info
-from inspect_ai.model._model import ModelRefusalError
+from inspect_ai.model._model import ModelRefusalError, model_event_metadata
 from inspect_ai.tool._tools._code_execution import CodeExecutionProviders
 from inspect_ai.tool._tools._web_search._web_search import WebSearchProviders
 from inspect_ai.util._limit import LimitExceededError
@@ -14,7 +15,10 @@ from inspect_ai.util._sandbox.service import find_control_flow
 
 from .._errors import PROVIDER_ERROR_KEY, ResponseFilterError, provider_error_payload
 from ..anthropic_api import inspect_anthropic_api_request
-from ..bridge import filter_sandbox_client_headers
+from ..bridge import (
+    filter_sandbox_client_headers,
+    model_event_metadata_from_headers,
+)
 from ..completions import inspect_completions_api_request
 from ..google_api import inspect_google_api_request
 from ..responses import inspect_responses_api_request
@@ -95,6 +99,16 @@ def _forward_provider_errors(
     return generate_forwarding_errors
 
 
+def _recorded_headers(
+    bridge: SandboxAgentBridge, headers: object
+) -> AbstractContextManager[None]:
+    """Record the request's `model_event_metadata_headers` on its model events."""
+    metadata = model_event_metadata_from_headers(
+        headers, bridge.model_event_metadata_headers
+    )
+    return model_event_metadata(metadata) if metadata else nullcontext()
+
+
 async def run_model_service(
     sandbox: SandboxEnvironment,
     web_search: WebSearchProviders | None,
@@ -137,11 +151,16 @@ def generate_completions(
         json_data: dict[str, JsonValue],
         headers: dict[str, str] | None = None,
     ) -> dict[str, JsonValue]:
-        completion = await inspect_completions_api_request(
-            json_data,
-            filter_sandbox_client_headers(headers, bridge.forward_client_headers),
-            bridge,
-        )
+        with _recorded_headers(bridge, headers):
+            completion = await inspect_completions_api_request(
+                json_data,
+                filter_sandbox_client_headers(
+                    headers,
+                    bridge.forward_client_headers,
+                    bridge.model_event_metadata_headers,
+                ),
+                bridge,
+            )
         return completion.model_dump(mode="json", warnings=False)
 
     return generate
@@ -156,13 +175,18 @@ def generate_responses(
         json_data: dict[str, JsonValue],
         headers: dict[str, str] | None = None,
     ) -> dict[str, JsonValue]:
-        completion = await inspect_responses_api_request(
-            json_data,
-            filter_sandbox_client_headers(headers, bridge.forward_client_headers),
-            web_search,
-            code_execution,
-            bridge,
-        )
+        with _recorded_headers(bridge, headers):
+            completion = await inspect_responses_api_request(
+                json_data,
+                filter_sandbox_client_headers(
+                    headers,
+                    bridge.forward_client_headers,
+                    bridge.model_event_metadata_headers,
+                ),
+                web_search,
+                code_execution,
+                bridge,
+            )
         return completion.model_dump(mode="json", warnings=False)
 
     return generate
@@ -177,13 +201,18 @@ def generate_anthropic(
         json_data: dict[str, JsonValue],
         headers: dict[str, str] | None = None,
     ) -> dict[str, JsonValue]:
-        completion = await inspect_anthropic_api_request(
-            json_data,
-            filter_sandbox_client_headers(headers, bridge.forward_client_headers),
-            web_search,
-            code_execution,
-            bridge,
-        )
+        with _recorded_headers(bridge, headers):
+            completion = await inspect_anthropic_api_request(
+                json_data,
+                filter_sandbox_client_headers(
+                    headers,
+                    bridge.forward_client_headers,
+                    bridge.model_event_metadata_headers,
+                ),
+                web_search,
+                code_execution,
+                bridge,
+            )
         return completion.model_dump(mode="json", warnings=False)
 
     return generate

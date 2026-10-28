@@ -383,6 +383,18 @@ Tools the agent runs itself (e.g. its own shell or file tools) appear only in th
 
 On a `require_proposal=False` server, a call is paired with the oldest pending proposal for the same tool and arguments, whichever call arrives first. A call the model did not propose (for example, one made from code the model wrote) with the same arguments as a pending proposal takes that proposal's id, and the proposed call is then recorded as `"exempt"` with a fresh id. Both calls run as usual; only the pairing in the log is wrong.
 
+Some agents name the conversation a request belongs to in a request header (Claude Code, for example, sends `x-claude-code-session-id`, and a subagent's requests also carry `x-claude-code-agent-id`). To keep these in the log, list them in `model_event_metadata_headers`:
+
+``` python
+async with sandbox_agent_bridge(
+    state,
+    model_event_metadata_headers=["x-claude-code-session-id", "x-claude-code-agent-id"],
+) as bridge:
+    ...
+```
+
+Every model call made while the bridge serves a request that carried one of these headers (the agent's turn, and any compaction, approval, filter or sentinel call made meanwhile, which `origin` tells apart) then has `metadata["bridge_request_headers"]` on its model event (the `BRIDGE_REQUEST_HEADERS` constant in `inspect_ai.model`), mapping the lowercase header name to the value the agent sent, so you can group the calls by the conversation the agent declared. The values are whatever the agent sent: use them to group calls, not as proof of which agent made a call. Only the headers you list are recorded, and they are not forwarded to the model provider (that is `forward_client_headers`). A value longer than 256 characters is not recorded, with a warning. Names that may carry a credential (any containing `auth`, `bearer`, `cookie`, `credential`, `dpop`, `jwt`, `key`, `password`, `secret`, `signature` or `token`) cannot be listed. Requests in the Google API format carry no client headers to the bridge, so nothing is recorded for them.
+
 If you want to use additional features of Inspect transcripts (e.g. spans, markdown output, etc.) you can still import and use the `transcript` function as normal. For example:
 
 ``` python

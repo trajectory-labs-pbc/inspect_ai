@@ -27,6 +27,7 @@ from inspect_ai.agent._bridge.types import AgentBridge
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model._compaction.types import CompactionStrategy
 from inspect_ai.model._model import (
+    BRIDGE_REQUEST_HEADERS,
     GenerateFilter,
     ModelEventSink,
     ModelResponseFilter,
@@ -187,6 +188,115 @@ def resolve_forward_client_headers(
     return resolved
 
 
+# Name fragments that mark a header as likely to carry a credential or a
+# signed value (`Authorization`, `Proxy-Authorization`, `x-api-key`, `api-key`,
+# `x-goog-api-key`, `Cookie`, `x-amz-security-token`, `DPoP`, ...). A header
+# whose name contains one cannot be listed in `model_event_metadata_headers`,
+# since the option writes header values to the log. This guards against listing
+# a credential by mistake; the eval author still chooses which headers to record.
+_CREDENTIAL_HEADER_NAME_PARTS = (
+    "auth",
+    "bearer",
+    "cookie",
+    "credential",
+    "dpop",
+    "jwt",
+    "key",
+    "password",
+    "secret",
+    "signature",
+    "token",
+)
+
+# Longest client header value recorded by `model_event_metadata_headers`. The
+# sandboxed agent chooses the value, so a longer one is dropped (with a warning)
+# rather than written to every model event of the request.
+_MAX_RECORDED_HEADER_VALUE = 256
+
+_HTTP_TOKEN_CHARACTERS = frozenset("!#$%&'*+-.^_`|~")
+
+
+def resolve_model_event_metadata_headers(
+    model_event_metadata_headers: Sequence[str] | None,
+) -> frozenset[str]:
+    """Validate `model_event_metadata_headers`, as lowercase header names.
+
+    Raises:
+        TypeError: The option is a bare string or not a sequence, or holds a
+            non-string.
+        ValueError: A name is empty or not a valid HTTP header name, or names a
+            header that may carry a credential: one whose name contains `auth`,
+            `bearer`, `cookie`, `credential`, `dpop`, `jwt`, `key`, `password`,
+            `secret`, `signature` or `token`.
+    """
+    if model_event_metadata_headers is None:
+        return frozenset()
+    if isinstance(model_event_metadata_headers, str) or not isinstance(
+        model_event_metadata_headers, Sequence
+    ):
+        raise TypeError(
+            "model_event_metadata_headers must be a list of header names "
+            f"(got {model_event_metadata_headers!r})."
+        )
+    names: set[str] = set()
+    for name in model_event_metadata_headers:
+        if not isinstance(name, str):
+            raise TypeError(
+                f"model_event_metadata_headers names must be strings (got {name!r})."
+            )
+        lower_name = name.strip().lower()
+        if not lower_name or not all(
+            c.isascii() and (c.isalnum() or c in _HTTP_TOKEN_CHARACTERS)
+            for c in lower_name
+        ):
+            raise ValueError(
+                f"model_event_metadata_headers cannot list '{name}': it is not a "
+                "valid HTTP header name."
+            )
+        if any(part in lower_name for part in _CREDENTIAL_HEADER_NAME_PARTS):
+            raise ValueError(
+                f"model_event_metadata_headers cannot list '{name}': it may carry "
+                "a credential, which would then be written to the log."
+            )
+        names.add(lower_name)
+    return frozenset(names)
+
+
+def model_event_metadata_from_headers(
+    headers: object, model_event_metadata_headers: frozenset[str]
+) -> dict[str, Any]:
+    """`ModelEvent.metadata` recording a sandboxed client's listed headers.
+
+    Returns `{BRIDGE_REQUEST_HEADERS: {name: value}}` holding the headers named
+    in `model_event_metadata_headers` (from
+    `resolve_model_event_metadata_headers`) that the request carried, keyed by
+    lowercase name, or an empty mapping when it carried none. Headers that are
+    not string names and values are ignored here; `filter_sandbox_client_headers`
+    reports them. A value longer than 256 characters is not recorded, and a
+    warning names the header. Recording a header does not forward it to the
+    model provider.
+    """
+    if not model_event_metadata_headers or not isinstance(headers, dict):
+        return {}
+    recorded: dict[str, str] = {}
+    for name, value in headers.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            continue
+        lower_name = name.lower()
+        if lower_name not in model_event_metadata_headers:
+            continue
+        if len(value) > _MAX_RECORDED_HEADER_VALUE:
+            warn_once(
+                logger,
+                f"Agent bridge did not record the sandboxed agent's '{lower_name}' "
+                f"header: its value is longer than {_MAX_RECORDED_HEADER_VALUE} "
+                "characters.",
+            )
+            continue
+        recorded[lower_name] = value
+    return {BRIDGE_REQUEST_HEADERS: recorded} if recorded else {}
+
+
 @cache
 def _decodable_content_codings() -> frozenset[str]:
     """Content codings every HTTP client the model providers use can decode.
@@ -252,6 +362,7 @@ def filter_bridge_headers(headers: dict[str, str] | None) -> dict[str, str] | No
 def filter_sandbox_client_headers(
     headers: object,
     forward_client_headers: Mapping[str, frozenset[str]],
+    recorded_headers: frozenset[str] = frozenset(),
 ) -> dict[str, str] | None:
     """Filter a sandboxed client's headers to `forward_client_headers`.
 
@@ -269,6 +380,8 @@ def filter_sandbox_client_headers(
             `resolve_forward_client_headers`. A listed header keeps only its
             listed comma-separated values (the others are dropped with a
             warning) and is removed if none remain.
+        recorded_headers: Headers the eval records in the log instead
+            (`model_event_metadata_headers`), so dropping them is not logged.
     """
     if headers is None:
         return None
@@ -297,7 +410,9 @@ def filter_sandbox_client_headers(
                 filtered[name] = value
         elif lower_name == "accept-encoding":
             filtered[name] = value
-        elif not _is_blocked_client_header(lower_name):
+        elif not _is_blocked_client_header(lower_name) and (
+            lower_name not in recorded_headers
+        ):
             _log_dropped_client_header(
                 f"Agent bridge did not forward the sandboxed agent's "
                 f"{_loggable(lower_name)} header. To forward it, list it in "
