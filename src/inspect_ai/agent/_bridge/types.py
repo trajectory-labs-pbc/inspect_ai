@@ -919,6 +919,10 @@ def _conversation_message_fingerprint(
     - reasoning parts: a provider's thought signature, which Gemini's CLI
       re-attaches as a redacted reasoning part the producer never emitted.
       Stripped from identity on both sides; what remains is what was said.
+    - object key order: JSON objects are unordered, and a CLI that re-serialises
+      the previous turn may echo `tool_calls[].arguments` with its keys in
+      another order (the antigravity CLI does). Every object in the identity is
+      hashed with its keys sorted.
     """
     message_identity = message.model_dump(
         exclude={
@@ -949,7 +953,9 @@ def _conversation_message_fingerprint(
         message_identity["content"] = "" if content == _NO_CONTENT_ECHO else content
     return _ConversationMessageFingerprint(
         role=message.role,
-        identity_hash=mm3_hash(to_json_str_safe(_condensed(message_identity))),
+        identity_hash=mm3_hash(
+            to_json_str_safe(_sorted_keys(_condensed(message_identity)))
+        ),
     )
 
 
@@ -958,6 +964,15 @@ _NO_CONTENT_ECHO = "(no content)"
 
 _CONDENSE_OVER_CHARS = 100
 """Transcript condensation threshold (`inspect_ai.log._condense`: text > 100)."""
+
+
+def _sorted_keys(value: object) -> object:
+    """The value with every object's keys in sorted order, at every depth."""
+    if isinstance(value, dict):
+        return {key: _sorted_keys(value[key]) for key in sorted(value, key=str)}
+    if isinstance(value, list):
+        return [_sorted_keys(item) for item in value]
+    return value
 
 
 def _condensed(value: object) -> object:
