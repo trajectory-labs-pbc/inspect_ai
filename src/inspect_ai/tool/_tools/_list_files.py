@@ -13,6 +13,8 @@ def list_files(
     timeout: int | None = None,
     user: str | None = None,
     sandbox: str | None = None,
+    *,
+    cwd: str | None = None,
 ) -> Tool:
     """Read-only directory listing tool.
 
@@ -22,6 +24,8 @@ def list_files(
         timeout: Timeout (in seconds) for listing.
         user: User to execute as.
         sandbox: Optional sandbox environment name.
+        cwd: Current working directory for sandbox execution. If None, uses the
+            sandbox provider's default working directory.
     """
 
     async def execute(path: str = ".", depth: int | None = None) -> str:
@@ -44,7 +48,7 @@ def list_files(
         sbox = sandbox_env(sandbox)
         result = await sbox.exec(
             cmd=cmd,
-            cwd=sandbox_identity_cwd(sbox, None),
+            cwd=sandbox_identity_cwd(sbox, cwd),
             timeout=timeout,
             user=sandbox_identity_user(sbox, user, strict=True),
             env=await sandbox_identity_vars(sbox, timeout),

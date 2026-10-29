@@ -19,14 +19,18 @@ policies match that tool's own name and approvers see its own arguments. For a s
 bridge that is the bridged tool the call's execution grant will bind, whatever name
 the scaffold declared it under, and for a call made through a scaffold's dispatcher
 function it is the bridged tool the dispatcher names; a `modify` decision is mapped
-back onto the call the scaffold receives.
+back onto the call the scaffold receives. Likewise a call to a tool the model was shown
+under another name than the scaffold declared it (`review_names`, from the Responses
+bridge's client tool discovery) is reviewed under the scaffold's name, unless it
+resolves to a bridged tool, which is reviewed under that tool's own name.
 """
 
+import dataclasses
 import sys
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, NoReturn, Sequence
 
 from inspect_ai._util.format import format_function_call
 from inspect_ai._util.logger import warn_once
@@ -94,6 +98,7 @@ async def apply_bridge_tool_approval(
     output: ModelOutput,
     history: list[ChatMessage],
     tools: Sequence[ToolInfo | Tool],
+    review_names: Mapping[str, str] | None = None,
 ) -> BridgeApproval:
     """Approve the tool calls in a bridged model response.
 
@@ -126,6 +131,11 @@ async def apply_bridge_tool_approval(
         history: Conversation that produced `output`.
         tools: Declarations the scaffold made to the model in the request that
             produced `output`, which resolve what each call would run.
+        review_names: Name each call is reviewed under, keyed by the name the
+            model called, for tools the model is shown under another name than
+            the scaffold declared. Applies only to a call reviewed as itself
+            (`AgentBridge.reviewed_calls` resolved it to no other tool); calls
+            with other names are reviewed as called.
 
     Returns:
         The response for the scaffold, plus the messages to replay to the model when
@@ -165,6 +175,13 @@ async def apply_bridge_tool_approval(
         for call in tool_calls:
             reviewed_calls = bridge.reviewed_calls(call, tools)
             for target in reviewed_calls.calls:
+                review_name = (
+                    (review_names or {}).get(target.function)
+                    if target.function == call.function
+                    else None
+                )
+                if review_name is not None:
+                    target = dataclasses.replace(target, function=review_name)
                 # each review gets its own copy, sharing nothing with the proposal
                 # or another review; its decision is judged against `shown`
                 reviewed = deepcopy(target)
