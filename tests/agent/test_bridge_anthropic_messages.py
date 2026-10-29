@@ -23,6 +23,7 @@ from inspect_ai.model._chat_message import (
     ChatMessageUser,
 )
 from inspect_ai.model._message_ids import content_hash
+from inspect_ai.model._model_output import ModelOutput, StopDetails, StopReason
 from inspect_ai.model._providers.anthropic import AnthropicAPI, message_block_params
 from inspect_ai.tool import WebSearchProviders
 from inspect_ai.tool._tool_info import ToolInfo
@@ -421,6 +422,119 @@ def test_anthropic_usage_omits_thinking_tokens_when_absent_beta() -> None:
     usage = anthropic_usage(ModelUsage(input_tokens=10, output_tokens=20), beta=True)
 
     assert usage.output_tokens_details is None
+
+
+async def _request_impl_reply(
+    monkeypatch: pytest.MonkeyPatch, output: ModelOutput, beta: bool
+) -> dict[str, Any]:
+    """Run inspect_anthropic_api_request_impl on a canned output and dump its reply."""
+    import inspect_ai.agent._bridge.anthropic_api_impl as impl
+    from inspect_ai.agent._agent import AgentState
+    from inspect_ai.agent._bridge.types import AgentBridge
+
+    async def generate(*args: Any, **kwargs: Any) -> tuple[ModelOutput, None]:
+        return output, None
+
+    monkeypatch.setattr(impl, "bridge_generate", generate)
+    bridge = AgentBridge(state=AgentState(messages=[]), allow_client_model_names=True)
+    reply = await impl.inspect_anthropic_api_request_impl(
+        {
+            "model": "mockllm/model",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        headers=None,
+        web_search=None,
+        code_execution=None,
+        bridge=bridge,
+        beta=beta,
+    )
+    return reply.model_dump(mode="json", warnings=False)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("beta", [False, True], ids=["messages", "beta"])
+async def test_request_impl_forwards_refusal_stop_details(
+    monkeypatch: pytest.MonkeyPatch, beta: bool
+) -> None:
+    """A refusal's category reaches the bridged client, where the API puts it."""
+    refusal = ModelOutput.from_content(
+        model="mockllm/model",
+        content="",
+        stop_reason="content_filter",
+        stop_details=StopDetails(
+            type="refusal", category="cyber", explanation="Blocked by policy."
+        ),
+    )
+
+    reply = await _request_impl_reply(monkeypatch, refusal, beta=beta)
+
+    assert reply["stop_reason"] == "refusal"
+    assert reply["stop_details"]["type"] == "refusal"
+    assert reply["stop_details"]["category"] == "cyber"
+    assert reply["stop_details"]["explanation"] == "Blocked by policy."
+
+
+@pytest.mark.parametrize(
+    "stop_reason,stop_details",
+    [
+        ("stop", StopDetails(type="refusal", category="cyber")),
+        ("content_filter", None),
+    ],
+    ids=["not-a-refusal", "no-details"],
+)
+def test_anthropic_stop_details_none(
+    stop_reason: StopReason, stop_details: StopDetails | None
+) -> None:
+    """Anthropic pairs stop_details with a refusal that has details to report."""
+    from inspect_ai.agent._bridge.anthropic_api_impl import anthropic_stop_details
+
+    output = ModelOutput.from_content(
+        model="mockllm/model",
+        content="",
+        stop_reason=stop_reason,
+        stop_details=stop_details,
+    )
+
+    assert anthropic_stop_details(output.choices[0]) is None
+
+
+def test_anthropic_stop_details_drops_other_provider_category() -> None:
+    """Another provider's category is not Anthropic's; its explanation still is sent."""
+    from inspect_ai.agent._bridge.anthropic_api_impl import anthropic_stop_details
+
+    output = ModelOutput.from_content(
+        model="mockllm/model",
+        content="",
+        stop_reason="content_filter",
+        stop_details=StopDetails(
+            type="content_filter", category="hate", explanation="Filtered: hate"
+        ),
+    )
+
+    details = anthropic_stop_details(output.choices[0])
+
+    assert details is not None
+    assert details.type == "refusal"
+    assert details.category is None
+    assert details.explanation == "Filtered: hate"
+
+
+def test_anthropic_stop_details_keeps_unknown_category() -> None:
+    """A category newer than the SDK's Literal still reaches the client."""
+    from inspect_ai.agent._bridge.anthropic_api_impl import anthropic_stop_details
+
+    output = ModelOutput.from_content(
+        model="mockllm/model",
+        content="",
+        stop_reason="content_filter",
+        stop_details=StopDetails(type="refusal", category="new_category"),
+    )
+
+    details = anthropic_stop_details(output.choices[0])
+
+    assert details is not None
+    assert details.model_dump(mode="json", warnings=False)["category"] == "new_category"
 
 
 # the providers a bridge resolves by default, and the raw default before resolution

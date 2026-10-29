@@ -15,6 +15,7 @@ from anthropic.types import (
     Message,
     MessageParam,
     OutputTokensDetails,
+    RefusalStopDetails,
     SearchResultBlockParam,
     TextBlockParam,
     ToolReferenceBlockParam,
@@ -24,6 +25,7 @@ from anthropic.types import StopReason as AnthropicStopReason
 from anthropic.types.beta import (
     BetaMessage,
     BetaOutputTokensDetails,
+    BetaRefusalStopDetails,
     BetaRequestMCPServerToolConfigurationParam,
     BetaRequestMCPServerURLDefinitionParam,
     BetaUsage,
@@ -56,7 +58,11 @@ from inspect_ai.model._internal import (
 )
 from inspect_ai.model._message_ids import shown_text
 from inspect_ai.model._model import Model, ModelName
-from inspect_ai.model._model_output import ModelUsage, StopReason
+from inspect_ai.model._model_output import (
+    ChatCompletionChoice,
+    ModelUsage,
+    StopReason,
+)
 from inspect_ai.model._providers._anthropic_citations import to_inspect_citation
 from inspect_ai.model._providers.anthropic import (
     _WEB_SEARCH_TOOL_TYPES,
@@ -125,6 +131,7 @@ async def inspect_anthropic_api_request_impl(
     bridge: AgentBridge,
     *,
     beta: bool = False,
+    metadata_headers: dict[str, str] | None = None,
 ) -> Message | BetaMessage:
     # resolve model
     bridge_model_name = str(json_data["model"])
@@ -211,6 +218,7 @@ async def inspect_anthropic_api_request_impl(
         config,
         requested_model=bridge_model_name,
         routing=routing,
+        metadata_headers=metadata_headers,
     )
     if c_message is not None:
         messages.append(c_message)
@@ -227,6 +235,7 @@ async def inspect_anthropic_api_request_impl(
         model=output.model,
         role="assistant",
         stop_reason=anthropic_stop_reason(output.stop_reason),
+        stop_details=anthropic_stop_details(output.choices[0], beta=beta),
         type="message",
         usage=anthropic_usage(output.usage or ModelUsage(), beta=beta),
     )
@@ -248,7 +257,9 @@ async def inspect_anthropic_api_request_impl(
     )
 
     # update state if we have more messages than the last generation
-    await bridge._track_state(messages, output, [transported])
+    await bridge._track_state(
+        messages, output, [transported], model=str(ModelName(model))
+    )
 
     return message
 
@@ -822,6 +833,29 @@ def anthropic_stop_reason(stop_reason: StopReason) -> AnthropicStopReason:
             return "refusal"
         case "unknown":
             return "end_turn"
+
+
+def anthropic_stop_details(
+    choice: ChatCompletionChoice, beta: bool = False
+) -> RefusalStopDetails | BetaRefusalStopDetails | None:
+    """Convert a refusal's stop details to the Anthropic type matching the endpoint.
+
+    Anthropic sends `stop_details` only with `stop_reason: "refusal"`, which the
+    bridge emits for a `content_filter` stop. Only a provider refusal carries a
+    category in Anthropic's vocabulary; another provider's category (e.g. "hate")
+    is sent as null and remains in the explanation. Built with `model_construct`
+    so a category newer than the SDK's `Literal` reaches the client rather than
+    failing the request.
+    """
+    details = choice.stop_details
+    if choice.stop_reason != "content_filter" or details is None:
+        return None
+    details_class = BetaRefusalStopDetails if beta else RefusalStopDetails
+    return details_class.model_construct(
+        type="refusal",
+        category=details.category if details.type == "refusal" else None,
+        explanation=details.explanation,
+    )
 
 
 def anthropic_usage(usage: ModelUsage, beta: bool = False) -> Usage | BetaUsage:

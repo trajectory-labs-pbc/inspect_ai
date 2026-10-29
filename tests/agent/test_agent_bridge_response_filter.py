@@ -79,6 +79,7 @@ from inspect_ai.model._chat_message import (
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._message_ids import edited_message
 from inspect_ai.model._model import (
+    BRIDGE_FILTER_SYNTHETIC,
     GenerateFilter,
     GenerateInput,
     Model,
@@ -568,7 +569,10 @@ def test_request_and_response_filter_compose(tmp_path: Path) -> None:
 def test_response_filter_runs_on_request_filter_substitute(tmp_path: Path) -> None:
     """An output the request filter substitutes also goes through the response filter.
 
-    `model.generate()` never runs in that case, so there is no ModelEvent.
+    `model.generate()` never runs in that case. The bridge records the filter's
+    output in a synthetic ModelEvent (`BRIDGE_FILTER_SYNTHETIC`, no provider
+    call), which keeps the output the filter returned, as a generation's event
+    keeps the model's own.
     """
     seen: list[str] = []
 
@@ -593,7 +597,10 @@ def test_response_filter_runs_on_request_filter_substitute(tmp_path: Path) -> No
     assert seen == ["FROM-REQUEST-FILTER"]
     assert log.samples is not None
     assert log.samples[0].output.completion == REPLACED_SENTINEL
-    assert not [e for e in log.samples[0].events if isinstance(e, ModelEvent)]
+    [event] = [e for e in log.samples[0].events if isinstance(e, ModelEvent)]
+    assert event.call is None
+    assert (event.metadata or {}).get(BRIDGE_FILTER_SYNTHETIC) is True
+    assert event.output.completion == "FROM-REQUEST-FILTER"
 
 
 _SANDBOX_SCAFFOLD_SCRIPT = (

@@ -2053,6 +2053,9 @@ async def test_anthropic_messages_streaming(
     # Check key event types were received
     event_types = {e.type for e in events if hasattr(e, "type")}
     assert "message_start" in event_types
+    message_start = next(event for event in events if event.type == "message_start")
+    assert message_start.message.id == "msg_test123"
+    assert message_start.message.model == "claude-opus-4-1-20250805"
     assert "content_block_start" in event_types
     assert "content_block_delta" in event_types
     assert "content_block_stop" in event_types
@@ -3407,6 +3410,60 @@ async def test_request_file_that_cannot_be_written_is_removed(
 
 
 @pytest.mark.asyncio
+async def test_anthropic_streaming_preserves_completed_message_identity_after_keepalive() -> (
+    None
+):
+    """Stream identity matches the completed bridge response after keepalives."""
+    completion = {
+        "id": "native-completion-id",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-returned-model",
+        "content": [{"type": "text", "text": "completed"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+    async def mock_service(method: str, **params: Any) -> dict[str, Any]:
+        assert method == "generate_anthropic"
+        if params["json_data"].get("stream"):
+            await asyncio.sleep(5.1)
+        return completion
+
+    body = {
+        "model": "claude-requested-model",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    async with _proxy_with_service(mock_service) as base_url:
+        async with ClientSession() as session:
+            async with session.post(
+                f"{base_url}/v1/messages", json={**body, "stream": True}
+            ) as response:
+                assert response.status == 200
+                assert response.headers["Connection"] == "close"
+                raw_events = [
+                    json.loads(event.partition("\ndata: ")[2])
+                    for event in (await response.text()).split("\n\n")
+                    if event
+                ]
+
+            async with session.post(f"{base_url}/v1/messages", json=body) as response:
+                assert response.status == 200
+                non_streaming = await response.json()
+
+    assert raw_events[0] == {"type": "ping"}
+    message_start = next(
+        event for event in raw_events if event["type"] == "message_start"
+    )
+    assert message_start["message"]["id"] == "native-completion-id"
+    assert message_start["message"]["model"] == "claude-returned-model"
+    assert non_streaming["id"] == message_start["message"]["id"]
+    assert non_streaming["model"] == message_start["message"]["model"]
+
+
+@pytest.mark.asyncio
 async def test_anthropic_streaming_provider_error_emits_sse_error() -> None:
     """The Anthropic streaming path forwards the error as an SSE error event."""
     body = {
@@ -3420,7 +3477,7 @@ async def test_anthropic_streaming_provider_error_emits_sse_error() -> None:
             async with session.post(f"{base_url}/v1/messages", json=body) as response:
                 assert response.status == 200
                 text = await response.text()
-    assert "event: message_start" in text
+    assert "event: message_start" not in text
     assert "event: error" in text
     assert "rate_limit_error" in text
     assert "overloaded" in text
@@ -3724,7 +3781,9 @@ async def test_proxy_leaves_client_header_policy_to_host(
 
     On the host, `filter_sandbox_client_headers` forwards only `Accept-Encoding`
     and the headers the eval lists in `forward_client_headers`, so the tenant
-    and custom headers here are dropped there. The Google route passes none.
+    and custom headers here are dropped there. The Google route passes them
+    too: the host forwards none to Google, but records the ones the bridge
+    selects for `ModelEvent` metadata (`model_event_metadata_headers`).
     """
     base_url, calls = proxy_server_recording_bridge
     async with ClientSession() as session:
@@ -3739,9 +3798,116 @@ async def test_proxy_leaves_client_header_policy_to_host(
     for name, value in _CLIENT_HEADERS.items():
         assert name.lower() not in body_sent.lower()
         assert value not in body_sent
-    if method == "generate_google":
-        assert "headers" not in params
-    else:
-        headers = params["headers"]
-        for name, value in _CLIENT_HEADERS.items():
-            assert headers[name.lower()] == value
+    headers = params["headers"]
+    for name, value in _CLIENT_HEADERS.items():
+        assert headers[name.lower()] == value
+
+
+# ---------- Stop fields on a streamed Anthropic reply ----------
+
+# What the host's generate_anthropic returns for a classifier refusal: the Message the bridge
+# builds, dumped. The host decides the stop fields once, for streaming and non-streaming
+# requests alike; the proxy's streaming conversion must hand every one of them on.
+_ANTHROPIC_REFUSAL_REPLY: dict[str, Any] = {
+    "id": "msg_refusal",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-x",
+    "content": [],
+    "stop_reason": "refusal",
+    "stop_sequence": None,
+    "stop_details": {
+        "type": "refusal",
+        "category": "cyber",
+        "explanation": "Cyber safeguards flagged this message.",
+    },
+    "container": None,
+    "usage": {"input_tokens": 20, "output_tokens": 0},
+}
+
+
+def _anthropic_reply(**fields: Any) -> dict[str, Any]:
+    return {
+        **_ANTHROPIC_REFUSAL_REPLY,
+        "content": [{"type": "text", "text": "partial"}],
+        "stop_reason": "end_turn",
+        "stop_details": None,
+        **fields,
+    }
+
+
+def _anthropic_reply_service(reply: dict[str, Any]) -> Any:
+    async def service(
+        method: str,
+        json_data: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert method == "generate_anthropic"
+        return json.loads(json.dumps(reply))
+
+    return service
+
+
+_ANTHROPIC_REQUEST: dict[str, Any] = {
+    "model": "claude-x",
+    "max_tokens": 8,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_streamed_refusal_carries_its_stop_details() -> None:
+    """A streamed refusal's message_delta carries the category the host set."""
+    service = _anthropic_reply_service(_ANTHROPIC_REFUSAL_REPLY)
+    async with _proxy_with_service(service) as base_url:
+        client = AsyncAnthropic(base_url=base_url, api_key="test")
+        async with client.messages.stream(**_ANTHROPIC_REQUEST) as stream:
+            deltas = [e.delta async for e in stream if e.type == "message_delta"]
+            final = await stream.get_final_message()
+
+    assert len(deltas) == 1
+    assert deltas[0].stop_reason == "refusal"
+    assert deltas[0].stop_details is not None
+    assert deltas[0].stop_details.category == "cyber"
+    assert (
+        deltas[0].stop_details.explanation == "Cyber safeguards flagged this message."
+    )
+    assert final.stop_details is not None
+    assert final.stop_details.category == "cyber"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(_ANTHROPIC_REFUSAL_REPLY, id="refusal"),
+        pytest.param(
+            _anthropic_reply(stop_reason="stop_sequence", stop_sequence="###"),
+            id="stop-sequence",
+        ),
+        pytest.param(
+            _anthropic_reply(
+                container={"id": "container_1", "expires_at": "2026-11-20T00:00:00Z"}
+            ),
+            id="container",
+        ),
+        pytest.param(_anthropic_reply(), id="end-turn"),
+    ],
+)
+async def test_anthropic_streamed_reply_ends_like_the_non_streamed_one(
+    reply: dict[str, Any],
+) -> None:
+    """Every field a message_delta can carry reaches a streaming client as it reaches a non-streaming one."""
+    from anthropic.types.raw_message_delta_event import Delta
+
+    delta_fields = set(Delta.model_fields)
+    assert {"stop_reason", "stop_sequence", "stop_details", "container"} <= delta_fields
+
+    async with _proxy_with_service(_anthropic_reply_service(reply)) as base_url:
+        client = AsyncAnthropic(base_url=base_url, api_key="test")
+        plain = await client.messages.create(**_ANTHROPIC_REQUEST)
+        async with client.messages.stream(**_ANTHROPIC_REQUEST) as stream:
+            streamed = await stream.get_final_message()
+
+    for field in sorted(delta_fields):
+        assert getattr(streamed, field) == getattr(plain, field), field

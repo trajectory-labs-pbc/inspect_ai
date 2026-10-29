@@ -336,3 +336,69 @@ def test_agent_message_carries_verbatim_item_as_internal() -> None:
     assert isinstance(content, list)
     assert isinstance(content[0], ContentText)
     assert content[0].internal == {"agent_message": original}
+
+
+async def test_native_v2_agent_message_id_round_trips_verbatim() -> None:
+    original = {
+        "type": "agent_message",
+        "id": "amsg_01a07523-ade2-7363-949c-08a1e028863a",
+        "author": "/root",
+        "recipient": "/root/write_child_proof",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "Message Type: NEW_TASK\n"
+                    "Task name: /root/write_child_proof\n"
+                    "Sender: /root\n"
+                    "Payload:\n"
+                ),
+            },
+            {
+                "type": "encrypted_content",
+                "encrypted_content": (
+                    "Use exec_command to create /home/model/child.txt containing "
+                    "exactly child complete, then report completion."
+                ),
+            },
+        ],
+    }
+
+    messages = messages_from_responses_input(
+        cast(list[ResponseInputItemParam], [original]), [], MODEL_NAME
+    )
+
+    assert [dict(item) for item in await openai_responses_inputs(messages)] == [
+        original
+    ]
+
+
+def test_legacy_agent_message_without_id_is_accepted() -> None:
+    original = _agent_message_item(_text("legacy delegate result"))
+
+    assert validate_agent_message(original) is original
+
+
+def test_agent_message_id_may_be_null() -> None:
+    original = _agent_message_item(_text("delegate result"))
+    original["id"] = None
+
+    assert validate_agent_message(original) is original
+
+
+def test_agent_message_id_must_be_a_string() -> None:
+    invalid = _agent_message_item(_text("delegate result"))
+    invalid["id"] = 1
+
+    with pytest.raises(ValueError, match="field 'id' must be a string"):
+        validate_agent_message(invalid)
+
+
+def test_agent_message_unknown_fields_remain_rejected() -> None:
+    invalid = _agent_message_item(_text("delegate result"))
+    invalid["unexpected"] = "value"
+
+    with pytest.raises(
+        ValueError, match="agent_message contains unsupported fields: unexpected"
+    ):
+        validate_agent_message(invalid)
