@@ -21,7 +21,7 @@ from inspect_ai.util._sandbox.service import find_control_flow
 
 from .._errors import PROVIDER_ERROR_KEY, ResponseFilterError, provider_error_payload
 from ..anthropic_api import inspect_anthropic_api_request
-from ..bridge import filter_sandbox_client_headers
+from ..bridge import filter_sandbox_client_headers, select_model_event_metadata_headers
 from ..completions import inspect_completions_api_request
 from ..google_api import inspect_google_api_request
 from ..responses import inspect_responses_api_request
@@ -286,6 +286,9 @@ def generate_completions(
             json_data,
             filter_sandbox_client_headers(headers, bridge.forward_client_headers),
             bridge,
+            metadata_headers=select_model_event_metadata_headers(
+                headers, bridge.model_event_metadata_headers
+            ),
         )
         return completion.model_dump(mode="json", warnings=False)
 
@@ -307,6 +310,9 @@ def generate_responses(
             web_search,
             code_execution,
             bridge,
+            metadata_headers=select_model_event_metadata_headers(
+                headers, bridge.model_event_metadata_headers
+            ),
         )
         return completion.model_dump(mode="json", warnings=False)
 
@@ -328,6 +334,9 @@ def generate_anthropic(
             web_search,
             code_execution,
             bridge,
+            metadata_headers=select_model_event_metadata_headers(
+                headers, bridge.model_event_metadata_headers
+            ),
         )
         return completion.model_dump(mode="json", warnings=False)
 
@@ -343,9 +352,15 @@ def generate_google(
         json_data: dict[str, JsonValue],
         headers: dict[str, str] | None = None,
     ) -> dict[str, JsonValue]:
-        del headers
+        # no client header is forwarded to Google; configured ones are recorded
         completion = await inspect_google_api_request(
-            json_data, web_search, code_execution, bridge
+            json_data,
+            web_search,
+            code_execution,
+            bridge,
+            metadata_headers=select_model_event_metadata_headers(
+                headers, bridge.model_event_metadata_headers
+            ),
         )
         return completion
 

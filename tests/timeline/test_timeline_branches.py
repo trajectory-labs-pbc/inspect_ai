@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 
+import pytest
+
 from inspect_ai.event import Event, Timeline, timeline_build, timeline_filter
 from inspect_ai.event._branch import BranchEvent
 from inspect_ai.event._model import ModelEvent
@@ -9,12 +11,14 @@ from inspect_ai.event._span import SpanBeginEvent, SpanEndEvent
 from inspect_ai.event._timeline import TimelineSpan
 from inspect_ai.model import (
     ChatMessageAssistant,
+    ChatMessageSystem,
     ChatMessageUser,
     GenerateConfig,
     ModelOutput,
     ModelUsage,
 )
 from inspect_ai.model._model_output import ChatCompletionChoice
+from inspect_ai.tool import ToolCall
 
 
 def _ts(seconds: float) -> datetime:
@@ -305,3 +309,136 @@ def test_timeline_filter_prunes_scorer_branches_without_mutating_full_timeline()
         assert _find_span(judge_timeline.root, span_id) is not None
 
     assert full_timeline == full_timeline_before_filtering
+
+
+def _agent_span_names(span: TimelineSpan) -> list[str]:
+    """Names of every agent span in the tree, depth first."""
+    names: list[str] = []
+    for item in span.content:
+        if isinstance(item, TimelineSpan):
+            if item.span_type == "agent":
+                names.append(item.name)
+            names.extend(_agent_span_names(item))
+    return names
+
+
+def _spans_of_type(span: TimelineSpan, span_type: str) -> list[TimelineSpan]:
+    found: list[TimelineSpan] = []
+    for item in span.content:
+        if isinstance(item, TimelineSpan):
+            if item.span_type == span_type:
+                found.append(item)
+            found.extend(_spans_of_type(item, span_type))
+    return found
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [None, ("agent", "scorer", "agent")],
+    ids=["no-origin", "recorded-origin"],
+)
+def test_nested_scorer_span_is_scoring_not_a_sub_agent(
+    origins: tuple[str, str, str] | None,
+) -> None:
+    """A scorer run mid-sample sits inside the agent's span.
+
+    Unrolling it would promote the scorer's own agent spans as the agent's
+    sub-agents. It is rendered as a scoring span, as the top-level scorers
+    phase is, with its events kept and its agent children not surfaced. A log
+    that records each call's `origin` marks the scorer's call `"scorer"`; the
+    scoring span is not classified, so that call is not wrapped as a utility
+    agent inside it.
+    """
+    events: list[Event] = [
+        _span_begin(uuid="b1", id="agent", ts=0, name="agent", span_type="agent"),
+        _model_event(uuid="m1", span_id="agent", ts=1, output_message_id="a1"),
+        _span_begin(
+            uuid="b2",
+            id="scorer",
+            parent_id="agent",
+            ts=2,
+            name="grader",
+            span_type="scorer",
+        ),
+        _span_begin(
+            uuid="b3",
+            id="grader-agent",
+            parent_id="scorer",
+            ts=3,
+            name="grader-agent",
+            span_type="agent",
+        ),
+        _model_event(uuid="m2", span_id="grader-agent", ts=4, output_message_id="g1"),
+        _span_end(uuid="e3", id="grader-agent", parent_id="scorer", ts=5),
+        _span_end(uuid="e2", id="scorer", parent_id="agent", ts=6),
+        _model_event(uuid="m3", span_id="agent", ts=7, output_message_id="a2"),
+        _span_end(uuid="e1", id="agent", ts=8),
+    ]
+
+    if origins is not None:
+        models = [event for event in events if isinstance(event, ModelEvent)]
+        for event, origin in zip(models, origins, strict=True):
+            event.origin = origin
+
+    timeline = timeline_build(events)
+
+    assert _agent_span_names(timeline.root) == ["agent"]
+    agent = _find_span(timeline.root, "agent")
+    assert agent is not None
+    agent_uuids = [
+        item.event.uuid for item in agent.content if not isinstance(item, TimelineSpan)
+    ]
+    assert agent_uuids == ["m1", "m3"]
+    (scoring,) = _spans_of_type(timeline.root, "scorers")
+    assert scoring.name == "grader"
+    scored_uuids = [
+        item.event.uuid
+        for item in scoring.content
+        if not isinstance(item, TimelineSpan)
+    ]
+    assert "m2" in scored_uuids
+    assert not scoring.utility
+
+
+def test_nested_scorer_span_under_a_tool_loop_is_not_a_utility_agent() -> None:
+    """A one-call scorer with its own prompt, beside an agent's tool loop.
+
+    That shape is what makes a nested agent span a utility agent (a single turn
+    with a different system prompt under a parent running a tool-calling loop),
+    but a scoring span is not an agent and is not classified.
+    """
+    agent_call = _model_event(uuid="m1", span_id="agent", ts=1, output_message_id="a1")
+    agent_call.input = [
+        ChatMessageSystem(content="You are the agent."),
+        ChatMessageUser(content="hello", id="user-1"),
+    ]
+    agent_call.output.choices[0].message.tool_calls = [
+        ToolCall(id="call-1", function="bash", arguments={"cmd": "ls"})
+    ]
+    scorer_call = _model_event(
+        uuid="m2", span_id="scorer", ts=3, output_message_id="g1"
+    )
+    scorer_call.input = [
+        ChatMessageSystem(content="You are the grader."),
+        ChatMessageUser(content="grade this", id="user-2"),
+    ]
+    events: list[Event] = [
+        _span_begin(uuid="b1", id="agent", ts=0, name="agent", span_type="agent"),
+        agent_call,
+        _span_begin(
+            uuid="b2",
+            id="scorer",
+            parent_id="agent",
+            ts=2,
+            name="grader",
+            span_type="scorer",
+        ),
+        scorer_call,
+        _span_end(uuid="e2", id="scorer", parent_id="agent", ts=4),
+        _span_end(uuid="e1", id="agent", ts=5),
+    ]
+
+    timeline = timeline_build(events)
+
+    (scoring,) = _spans_of_type(timeline.root, "scorers")
+    assert not scoring.utility
