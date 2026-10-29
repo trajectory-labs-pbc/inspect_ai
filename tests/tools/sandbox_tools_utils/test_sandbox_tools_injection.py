@@ -67,6 +67,7 @@ OK = ExecResult(success=True, returncode=0, stdout="", stderr="")
 """Result of an ordinary (non-helper) command."""
 
 VERSION = sandbox_tools._get_sandbox_tools_version()
+FORK_REVISION = sandbox_tools._get_sandbox_tools_fork_revision()
 """The sandbox tools version this release installs."""
 
 VERIFIED = ExecResult(
@@ -161,6 +162,21 @@ TAR_XZF_STDIN = "tar xzf - || { cat >/dev/null; exit 1; }"
 TAR_XF_STDIN = "tar xf - || { cat >/dev/null; exit 1; }"
 
 
+def is_version_query(cmd: list[str]) -> bool:
+    return cmd == [SANDBOX_CLI, "exec"]
+
+
+def version_ok() -> ExecResult[str]:
+    """The fork's post-start version handshake: a binary at the expected fork revision."""
+    fork_rev = sandbox_tools._get_sandbox_tools_fork_revision()
+    return ExecResult(
+        success=True,
+        returncode=0,
+        stdout=f'{{"jsonrpc":"2.0","result":"1.4.1+tl.{fork_rev}","id":1}}',
+        stderr="",
+    )
+
+
 def helper_ok(cmd: list[str], user: str | None) -> ExecResult[str]:
     """Every helper call verifies; every other command succeeds (root is usable)."""
     if is_framework_dir_call(cmd):
@@ -169,6 +185,8 @@ def helper_ok(cmd: list[str], user: str | None) -> ExecResult[str]:
         return DEFAULT_USER
     if is_root_probe(cmd):
         return root_probe_result()
+    if is_version_query(cmd):
+        return version_ok()
     return OK
 
 
@@ -270,7 +288,9 @@ async def test_detector_skips_root_probe_after_rootless_injection(
     def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
         if user == "root":
             raise RuntimeError("runuser: may not be used by non-root users")
-        return REGULAR_FILE if is_framework_dir_call(cmd) else OK
+        if is_framework_dir_call(cmd):
+            return REGULAR_FILE
+        return version_ok() if is_version_query(cmd) else OK
 
     sandbox = CannedSandbox(policy)
     await sandbox_tools._inject_container_tools_code(sandbox)
@@ -735,8 +755,10 @@ async def test_extract_reports_failure_of_both_tar_attempts() -> None:
 
 
 def test_tools_dir_is_per_version() -> None:
-    """Each tools version installs into, and adopts, only its own tree."""
-    assert SANDBOX_TOOLS_DIR == f"/var/tmp/.da7be258e003d428-v{VERSION}"
+    """Each tools version and fork revision installs into, and adopts, only its own tree."""
+    assert (
+        SANDBOX_TOOLS_DIR == f"/var/tmp/.da7be258e003d428-v{VERSION}-tl{FORK_REVISION}"
+    )
     assert SANDBOX_CLI == f"{SANDBOX_TOOLS_DIR}/inspect-sandbox-tools"
 
 
@@ -762,12 +784,41 @@ def test_tools_version_is_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
     for arch, dev, musl in variants:
         name = sandbox_tools._get_executable_name(arch, dev, musl)
         assert f"-v{VERSION}" in name, name
-    assert SANDBOX_TOOLS_DIR.endswith(f"-v{VERSION}")
+    assert SANDBOX_TOOLS_DIR.endswith(f"-v{VERSION}-tl{FORK_REVISION}")
+
+
+def test_tools_fork_revision_is_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fork: the revision is fixed at import, like the version.
+
+    A changed ``sandbox_tools_fork_revision.txt`` under a running process cannot
+    split the directory, the artifact name and the handshake.
+    """
+    read_text = Path.read_text
+
+    def bumped(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.name == "sandbox_tools_fork_revision.txt":
+            return f"{FORK_REVISION + 1}\n"
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", bumped)
+    assert sandbox_tools._get_sandbox_tools_fork_revision() == FORK_REVISION
+    name = sandbox_tools._get_executable_name("amd64", False, False)
+    assert name.endswith(f"-v{VERSION}-tl{FORK_REVISION}"), name
 
 
 def _launcher_script(tag: str, log: Path) -> str:
-    """A launcher that appends its tag, command and server directory to ``log``."""
-    return f'#!/bin/sh\necho "{tag} $1 ${{INSPECT_SANDBOX_TOOLS_DIR:-tree}}" >> {log}\n'
+    """A launcher that appends its tag, command and server directory to ``log``.
+
+    It answers the fork's post-start version handshake (``exec``) without
+    logging, as a binary at the expected fork revision.
+    """
+    fork_rev = sandbox_tools._get_sandbox_tools_fork_revision()
+    version = f'{{"jsonrpc":"2.0","result":"1.4.1+tl.{fork_rev}","id":1}}'
+    return (
+        "#!/bin/sh\n"
+        f"if [ \"$1\" = exec ]; then echo '{version}'; exit 0; fi\n"
+        f'echo "{tag} $1 ${{INSPECT_SANDBOX_TOOLS_DIR:-tree}}" >> {log}\n'
+    )
 
 
 def _tools_archive(launcher: str) -> bytes:
@@ -800,7 +851,14 @@ async def test_local_sandbox_installs_its_version_beside_older_trees(
     adopted by a later sample.
     """
     log = tmp_path / "launcher.log"
-    old_trees = [tmp_path / ".da7be258e003d428", tmp_path / ".da7be258e003d428-v38"]
+    # Fork: upstream's tree for this same version (no -tl) and another fork
+    # revision's tree are older trees too, and must not be adopted either.
+    old_trees = [
+        tmp_path / ".da7be258e003d428",
+        tmp_path / ".da7be258e003d428-v38",
+        tmp_path / f".da7be258e003d428-v{VERSION}",
+        tmp_path / f".da7be258e003d428-v{VERSION}-tl{FORK_REVISION + 1}",
+    ]
     for tree in old_trees:
         tree.mkdir(mode=0o700)
         (tree / "inspect-sandbox-tools").write_text(_launcher_script("old", log))

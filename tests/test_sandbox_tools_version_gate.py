@@ -13,6 +13,11 @@ lives outside `src/inspect_sandbox_tools/` (a lockfile, a Dockerfile, the
 the gate without a version bump. Three invariants also check that
 `injectable_paths.txt` covers everything the build reads, sits inside the
 provenance `BUILD_INPUTS` set, and excludes the host-side files.
+
+Fork: this fork's `bump` step gates `sandbox_tools_fork_revision.txt` instead
+of `sandbox_tools_version.txt` (an injectable change needs exactly revision
+N+1; the upstream tools version is taken from upstream unchanged), so the
+synthetic base seeds the revision file and a "bump" here is a revision bump.
 """
 
 import ast
@@ -34,9 +39,12 @@ from test_sandbox_tools_release import (
 
 UTILS = "src/inspect_ai/tool/_sandbox_tools_utils"
 V_PATH = f"{UTILS}/sandbox_tools_version.txt"
+REV_PATH = f"{UTILS}/sandbox_tools_fork_revision.txt"
 INJECTABLE_PATHS = f"{UTILS}/injectable_paths.txt"
 
 BASE_VERSION = "36"
+BASE_REVISION = "1"
+BUMPED_REVISION = "2"
 
 # One seed file per category a test edits; every path a PR touches must exist on
 # the base commit so a diff can be produced against it.
@@ -90,6 +98,7 @@ def _github_output(path: Path) -> dict[str, str]:
 def _seed_repo(repo: Path) -> None:
     _init_repo(repo)
     _write(repo, V_PATH, f"{BASE_VERSION}\n")
+    _write(repo, REV_PATH, f"{BASE_REVISION}\n")
     # Use the production injectable_paths.txt so the pathspecs under test are the
     # real ones, not a hand-copied list that could drift.
     _write(repo, INJECTABLE_PATHS, (REPO / INJECTABLE_PATHS).read_text())
@@ -143,7 +152,7 @@ def _change(repo: Path, edits: dict[str, str], version: str | None = None) -> No
     for rel, content in edits.items():
         _write(repo, rel, content)
     if version is not None:
-        _write(repo, V_PATH, f"{version}\n")
+        _write(repo, REV_PATH, f"{version}\n")
     _commit(repo, "pr change")
 
 
@@ -169,7 +178,7 @@ def test_injectable_change_without_bump_fails(path: str, tmp_path: Path) -> None
     result = _run_gate(repo, tmp_path)
     assert result.injectable_src == "true"
     assert result.bump_returncode == 1
-    assert "bump it above" in result.bump_output
+    assert f"bump it to tl{BUMPED_REVISION}" in result.bump_output
 
 
 def test_source_change_with_bump_passes(tmp_path: Path) -> None:
@@ -178,7 +187,7 @@ def test_source_change_with_bump_passes(tmp_path: Path) -> None:
     _change(
         repo,
         {"src/inspect_sandbox_tools/src/inspect_sandbox_tools/foo.py": "edited\n"},
-        version="37",
+        version=BUMPED_REVISION,
     )
     result = _run_gate(repo, tmp_path)
     assert result.injectable_src == "true"
@@ -186,10 +195,28 @@ def test_source_change_with_bump_passes(tmp_path: Path) -> None:
     assert result.correctly_bumped == "true"
 
 
+def test_injectable_change_skipping_a_revision_fails(tmp_path: Path) -> None:
+    """Fork: the revision must be exactly N+1, never a gap.
+
+    Published assets are named by revision, and the runtime refuses any other one.
+    """
+    repo = tmp_path / "repo"
+    _seed_repo(repo)
+    _change(
+        repo,
+        {"src/inspect_sandbox_tools/src/inspect_sandbox_tools/foo.py": "edited\n"},
+        version="3",
+    )
+    result = _run_gate(repo, tmp_path)
+    assert result.injectable_src == "true"
+    assert result.bump_returncode == 1
+    assert f"bump it to tl{BUMPED_REVISION}" in result.bump_output
+
+
 def test_lock_change_with_bump_passes(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _seed_repo(repo)
-    _change(repo, {f"{UTILS}/requirements.txt": "edited\n"}, version="37")
+    _change(repo, {f"{UTILS}/requirements.txt": "edited\n"}, version=BUMPED_REVISION)
     result = _run_gate(repo, tmp_path)
     assert result.injectable_src == "true"
     assert result.bump_returncode == 0
@@ -220,7 +247,7 @@ def test_non_injectable_change_without_bump_passes(path: str, tmp_path: Path) ->
 def test_non_injectable_change_with_bump_fails(path: str, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _seed_repo(repo)
-    _change(repo, {path: "edited\n"}, version="37")
+    _change(repo, {path: "edited\n"}, version=BUMPED_REVISION)
     result = _run_gate(repo, tmp_path)
     assert result.injectable_src == "false"
     assert result.bump_returncode == 1
@@ -230,7 +257,7 @@ def test_non_injectable_change_with_bump_fails(path: str, tmp_path: Path) -> Non
 def test_bump_alone_without_content_change_fails(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _seed_repo(repo)
-    _change(repo, {}, version="37")
+    _change(repo, {}, version=BUMPED_REVISION)
     result = _run_gate(repo, tmp_path)
     assert result.injectable_src == "false"
     assert result.bump_returncode == 1
@@ -251,6 +278,7 @@ def test_base_advance_after_merge_commit_not_attributed_to_pr(
     repo = tmp_path / "repo"
     _init_repo(repo)
     _write(repo, V_PATH, f"{BASE_VERSION}\n")
+    _write(repo, REV_PATH, f"{BASE_REVISION}\n")
     _write(repo, INJECTABLE_PATHS, (REPO / INJECTABLE_PATHS).read_text())
     for rel in SEED_FILES:
         _write(repo, rel, "base\n")
@@ -294,7 +322,7 @@ def test_whitespace_padded_injectable_entry_still_matches(tmp_path: Path) -> Non
     result = _run_gate(repo, tmp_path)
     assert result.injectable_src == "true"
     assert result.bump_returncode == 1
-    assert "bump it above" in result.bump_output
+    assert f"bump it to tl{BUMPED_REVISION}" in result.bump_output
 
 
 # --- Invariants between injectable_paths.txt, the build, and BUILD_INPUTS -----
