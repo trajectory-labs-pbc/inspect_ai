@@ -917,6 +917,28 @@ def _unroll_span(
         span: The non-agent EventTreeSpan to unroll.
         into: The content list to append results to.
     """
+    if span.type == "scorer":
+        # A scorer that ran mid-sample (a `score()` call from a human agent or a
+        # solver). Render it as a scoring span holding its flattened events, as
+        # the top-level scorers phase is, instead of dissolving it into the agent
+        # trajectory: unrolling would promote the scorer's own agent spans as the
+        # agent's sub-agents. It is not a trajectory, so the classification
+        # passes leave it alone (`_wrap_utility_events`,
+        # `_classify_utility_agents`).
+        scoring_content: list[TimelineEvent | TimelineSpan] = [
+            TimelineEvent(event=e) for e in event_sequence(span.children)
+        ]
+        if scoring_content:
+            into.append(
+                TimelineSpan(
+                    id=span.id,
+                    name=span.name,
+                    span_type="scorers",
+                    content=scoring_content,
+                )
+            )
+        return
+
     # Emit span begin event
     into.append(TimelineEvent(event=span.begin))
 
@@ -1998,6 +2020,11 @@ def _wrap_utility_events(
         inputs: The model inputs.
         turns: Whether each call with no recorded origin is a turn by continuity, by `id()` of its event.
     """
+    # a scoring span (a scorer run mid-sample, see `_unroll_span`) is not a
+    # trajectory: its model calls are the scorer's, not turns or helpers
+    if agent.span_type == "scorers":
+        return
+
     # The primary prompt comes only from a tool-calling ModelEvent: without
     # an agentic loop there is no primary trajectory (see docstring).
     by_conversation = turns is not None
@@ -2188,6 +2215,11 @@ def _classify_utility_agents(
         parent_has_loop: Whether the parent has a tool-calling ModelEvent
             in its direct content.
     """
+    # a scoring span (a scorer run mid-sample, see `_unroll_span`) is not an
+    # agent, so it is never classified as a utility agent
+    if node.span_type == "scorers":
+        return
+
     agent_system_prompt = _get_system_prompt(node, inputs)
 
     # Classify this node (root agent is never utility). Tool-invoked

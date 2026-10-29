@@ -25,6 +25,12 @@ the host for the ``local`` sandbox, in a reused container, or in an image with t
 tools preinstalled), and a tree from another version may not speak this release's
 protocol. With a path per version, a tree is only ever reused by the version that
 installed it, and trees (and running servers) from other versions are left alone.
+
+Fork: the name also ends in the fork artifact revision
+(``sandbox_tools_fork_revision.txt``), ``-v{version}-tl{revision}``, because the
+fork ships ``-v{N}-tl{M}`` binaries that differ from upstream's ``-v{N}`` and from
+each other. Upstream's tree and another fork revision's tree are never adopted, so a
+reused tree always passed this revision's post-start handshake when it was installed.
 """
 
 from pathlib import Path
@@ -54,7 +60,24 @@ Read once, so the install directory and the artifact chosen for it always name t
 same version, even if the package is upgraded under a running process.
 """
 
-SANDBOX_TOOLS_DIR = f"/var/tmp/.da7be258e003d428-v{SANDBOX_TOOLS_VERSION}"
+
+def _read_sandbox_tools_fork_revision() -> str:
+    revision_file = (
+        Path(__file__).parents[2]
+        / "tool"
+        / "_sandbox_tools_utils"
+        / "sandbox_tools_fork_revision.txt"
+    )
+    return revision_file.read_text().strip()
+
+
+SANDBOX_TOOLS_FORK_REVISION = _read_sandbox_tools_fork_revision()
+"""The fork artifact revision this process injects, read once like the version."""
+
+SANDBOX_TOOLS_DIR = (
+    f"/var/tmp/.da7be258e003d428-v{SANDBOX_TOOLS_VERSION}"
+    f"-tl{SANDBOX_TOOLS_FORK_REVISION}"
+)
 
 SANDBOX_CLI = f"{SANDBOX_TOOLS_DIR}/{SANDBOX_TOOLS_BASE_NAME}"
 

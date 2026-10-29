@@ -1,0 +1,2 @@
+var e=e=>!isNaN(parseFloat(String(e)))&&isFinite(Number(e)),t=e=>Array.isArray(e)?e:[e],n=e=>Array.isArray(e),r=e=>typeof e==`object`&&!!e&&!Array.isArray(e);export{t as i,n,r,e as t};
+//# sourceMappingURL=type-DAEpXLU3.js.map

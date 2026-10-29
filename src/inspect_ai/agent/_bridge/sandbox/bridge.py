@@ -37,6 +37,7 @@ from inspect_ai.util._sandbox.exec_remote import (
 from inspect_ai.util._sandbox.service import find_control_flow
 
 from ..._agent import AgentState
+from ..types import StateFilter
 from ..util import resolve_bridge_code_execution, resolve_bridge_web_search
 from .service import MODEL_SERVICE, run_model_service
 from .types import SandboxAgentBridge
@@ -68,11 +69,14 @@ async def sandbox_agent_bridge(
     client_mcp_servers: bool | None = None,
     bridged_tools: Sequence[BridgedToolsSpec] | None = None,
     model_event_sink: ModelEventSink | None = None,
+    model_event_metadata_headers: Sequence[str] | None = None,
     forward_generation_config: bool = False,
     approval: list["ApprovalPolicy"] | None = None,
     checkpointer: Checkpointer | None = None,
     forward_client_headers: Mapping[str, Sequence[str]] | None = None,
     response_filter: ModelResponseFilter | None = None,
+    state_filter: StateFilter | None = None,
+    accumulate_conversations: bool = False,
 ) -> AsyncIterator[SandboxAgentBridge]:
     """Sandbox agent bridge.
 
@@ -170,6 +174,14 @@ async def sandbox_agent_bridge(
             on the proposing `ModelEvent` by the time `on_complete` returns,
             and is recorded right away: a span set later, or a `ModelEvent`
             the sink emits later, is not matched up with it.
+        model_event_metadata_headers: Optional non-sensitive client request
+            header names to copy into each matching bridged `ModelEvent`'s
+            metadata under `BRIDGE_REQUEST_HEADERS`. Names are matched
+            case-insensitively and recorded in lower case. Selection is
+            independent of `forward_client_headers`: a header recorded here is
+            not forwarded to the model provider unless that option lists it.
+            Sensitive names (e.g. authorization, cookies, API keys) are
+            rejected. Defaults to `None`.
         forward_generation_config: Forward client generation parameters (e.g.
             `max_tokens`, `temperature`, reasoning effort) to the model. Defaults
             to `False`, in which case those parameters are dropped and the resolved
@@ -203,6 +215,15 @@ async def sandbox_agent_bridge(
         response_filter: Filter that can replace model output after generation
             (see ``ModelResponseFilter``). Return ``None`` to pass through;
             return a ``ModelOutput`` to replace the response.
+        state_filter: Optional predicate that selects client requests whose
+            generations update the yielded state's messages and output.
+            Rejected requests still receive normal model responses and model
+            events, and still tick the checkpointer.
+        accumulate_conversations: Keep every conversation observed over the bridge
+            rather than tracking a single main one. Defaults to `False`, which surfaces
+            the main agent loop and treats other traffic as side calls. Set `True` when
+            the sandbox may run several independent conversations: `state.messages`
+            then holds each in the order they started.
     """
     warn_sentinel_bridged()
 
@@ -246,12 +267,15 @@ async def sandbox_agent_bridge(
                 model_aliases=model_aliases,
                 model_resolver=model_resolver,
                 model_event_sink=model_event_sink,
+                model_event_metadata_headers=model_event_metadata_headers,
                 forward_generation_config=forward_generation_config,
                 approval=approval,
                 checkpointer=checkpointer,
+                state_filter=state_filter,
                 allow_remote_mcp=allow_remote_mcp,
                 forward_client_headers=forward_client_headers,
                 response_filter=response_filter,
+                accumulate_conversations=accumulate_conversations,
             )
 
             # register bridged tools with the bridge
@@ -311,6 +335,7 @@ async def sandbox_agent_bridge(
                     yield bridge
                 agent_completed = True
             finally:
+                bridge.close_conversation_spans()
                 with anyio.CancelScope(shield=True):
                     # ensure the process terminates (no-op if already dead)
                     await proxy.kill()
