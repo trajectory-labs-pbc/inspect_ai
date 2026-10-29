@@ -566,6 +566,8 @@ async def test_sandbox_generation_filters_and_forwards_client_headers(
         json_data: dict[str, JsonValue],
         headers: dict[str, str] | None,
         bridge: SandboxAgentBridge,
+        *,
+        metadata_headers: dict[str, str] | None = None,
     ) -> _SandboxCompletion:
         received_headers.append(headers)
         return _SandboxCompletion()
@@ -598,6 +600,8 @@ async def test_sandbox_responses_filters_and_forwards_client_headers(
         web_search: WebSearchProviders,
         code_execution: CodeExecutionProviders,
         bridge: SandboxAgentBridge,
+        *,
+        metadata_headers: dict[str, str] | None = None,
     ) -> _SandboxCompletion:
         received_headers.append(headers)
         return _SandboxCompletion()
@@ -632,6 +636,8 @@ async def test_sandbox_anthropic_filters_and_forwards_client_headers(
         web_search: WebSearchProviders,
         code_execution: CodeExecutionProviders,
         bridge: SandboxAgentBridge,
+        *,
+        metadata_headers: dict[str, str] | None = None,
     ) -> _SandboxCompletion:
         received_headers.append(headers)
         return _SandboxCompletion()
@@ -668,6 +674,8 @@ async def test_sandbox_anthropic_forwards_only_allowed_client_betas(
         web_search: WebSearchProviders,
         code_execution: CodeExecutionProviders,
         bridge: SandboxAgentBridge,
+        *,
+        metadata_headers: dict[str, str] | None = None,
     ) -> _SandboxCompletion:
         received_headers.append(headers)
         return _SandboxCompletion()
@@ -723,6 +731,8 @@ async def test_sandbox_google_generation_accepts_service_headers(
         web_search: WebSearchProviders,
         code_execution: CodeExecutionProviders,
         bridge: SandboxAgentBridge,
+        *,
+        metadata_headers: dict[str, str] | None = None,
     ) -> dict[str, JsonValue]:
         return {"id": "completion"}
 
@@ -730,7 +740,7 @@ async def test_sandbox_google_generation_accepts_service_headers(
     generate = bridge_service.generate_google(
         cast(WebSearchProviders, None),
         cast(CodeExecutionProviders, None),
-        cast(SandboxAgentBridge, None),
+        _bridge(),
     )
 
     result = await generate({"model": "inspect"}, {"x-claude-code-agent-id": "toolu_x"})

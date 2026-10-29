@@ -14,6 +14,7 @@ async def inspect_google_api_request(
     bridge: AgentBridge,
     *,
     requested_model: str | None = None,
+    metadata_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     from .google_api_impl import inspect_google_api_request_impl
 
@@ -23,4 +24,5 @@ async def inspect_google_api_request(
         code_execution,
         bridge,
         requested_model=requested_model,
+        metadata_headers=metadata_headers,
     )
