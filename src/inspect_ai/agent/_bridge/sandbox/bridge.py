@@ -27,19 +27,17 @@ from inspect_ai.tool._tools._web_search._web_search import (
 from inspect_ai.util._anyio import inner_exception
 from inspect_ai.util._checkpoint.checkpointer import Checkpointer
 from inspect_ai.util._sandbox._cli import SANDBOX_CLI
-from inspect_ai.util._sandbox.environment import SandboxEnvironment
 from inspect_ai.util._sandbox.exec_remote import (
     ExecCompleted,
     ExecRemoteProcess,
     ExecRemoteStreamingOptions,
     ExecStderr,
 )
-from inspect_ai.util._sandbox.service import SandboxServiceMethod
 
 from ..._agent import AgentState
 from ..types import StateFilter
 from ..util import resolve_bridge_code_execution, resolve_bridge_web_search
-from .service import MODEL_SERVICE, model_service_methods, run_model_service
+from .service import MODEL_SERVICE, run_model_service
 from .types import SandboxAgentBridge
 
 if TYPE_CHECKING:
@@ -201,6 +199,9 @@ async def sandbox_agent_bridge(
     """
     warn_sentinel_bridged()
 
+    # instance id for this bridge
+    instance = f"proxy_{uuid()}"
+
     # resolve sandbox
     sandbox_env = await sandbox_with_injected_tools(sandbox_name=sandbox)
 
@@ -217,82 +218,57 @@ async def sandbox_agent_bridge(
     # create a state value that will be used to track mesages going over the bridge
     state = state or AgentState(messages=[])
 
-    # create the bridge and register its bridged tools
-    bridge = SandboxAgentBridge(
-        state=state,
-        filter=filter,
-        retry_refusals=retry_refusals,
-        compaction=compaction,
-        port=port,
-        model=model,
-        model_aliases=model_aliases,
-        model_resolver=model_resolver,
-        model_event_sink=model_event_sink,
-        model_event_metadata_headers=model_event_metadata_headers,
-        forward_generation_config=forward_generation_config,
-        approval=approval,
-        checkpointer=checkpointer,
-        state_filter=state_filter,
-        allow_remote_mcp=allow_remote_mcp,
-        response_filter=response_filter,
-        accumulate_conversations=accumulate_conversations,
-    )
-    _register_bridged_tool_specs(bridge, bridged_tools or [], port)
-
-    async with _model_proxy_service(
-        sandbox_env,
-        model_service_methods(web_search_grant, code_execution_grant, bridge),
-        bridge,
-        port=port,
-        polling_interval=2,
-        caller="sandbox_agent_bridge",
-        poll_timeout_recovery=poll_timeout_recovery,
-    ):
-        yield bridge
-
-
-@contextlib.asynccontextmanager
-async def _model_proxy_service(
-    sandbox_env: SandboxEnvironment,
-    methods: dict[str, SandboxServiceMethod],
-    bridge: SandboxAgentBridge,
-    *,
-    port: int,
-    polling_interval: float | None,
-    caller: str,
-    poll_timeout_recovery: float | None = None,
-) -> AsyncIterator[None]:
-    """Run the in-sandbox model proxy against `methods` for the duration of the block.
-
-    The one implementation behind `sandbox_agent_bridge` and `sandbox_model_proxy`.
-    Starts the model service (`run_model_service`) serving `methods`, then the
-    `model_proxy` process of the injected sandbox tools, which listens on
-    `localhost:<port>` inside `sandbox_env` and files each HTTP request into the
-    service. The block fails if the proxy process dies or a handler asks to fail it
-    through `bridge.request_fail`. `poll_timeout_recovery` is passed to the proxy
-    process's `exec_remote` options. On exit the proxy is killed and the service
-    stopped. An error raised by that cleanup after the block completed normally is
-    logged (naming `caller`) rather than raised.
-    """
-    # instance id for this proxy
-    instance = f"proxy_{uuid()}"
-
-    # Track whether the block completed successfully. If so, cleanup errors
+    # Track whether the agent completed successfully. If so, cleanup errors
     # should be logged but not cause the sample to fail.
-    block_completed = False
+    agent_completed = False
 
     try:
         async with anyio.create_task_group() as tg:
             # event to signal startup of model service
             started = anyio.Event()
 
+            # create the bridge (will register bridged tools below)
+            bridge = SandboxAgentBridge(
+                state=state,
+                filter=filter,
+                retry_refusals=retry_refusals,
+                compaction=compaction,
+                port=port,
+                model=model,
+                model_aliases=model_aliases,
+                model_resolver=model_resolver,
+                model_event_sink=model_event_sink,
+                model_event_metadata_headers=model_event_metadata_headers,
+                forward_generation_config=forward_generation_config,
+                approval=approval,
+                checkpointer=checkpointer,
+                state_filter=state_filter,
+                allow_remote_mcp=allow_remote_mcp,
+                response_filter=response_filter,
+                accumulate_conversations=accumulate_conversations,
+            )
+
+            # register bridged tools with the bridge
+            seen_names: set[str] = set()
+            for spec in bridged_tools or []:
+                if spec.name in seen_names:
+                    raise ValueError(
+                        f"Duplicate bridged_tools name: '{spec.name}'. "
+                        "Each BridgedToolsSpec must have a unique name."
+                    )
+                seen_names.add(spec.name)
+                config = _register_bridged_tools(bridge, spec, port)
+                bridge.mcp_server_configs.append(config)
+            bridge.warn_indistinct_tools()
+
             # sandbox service that receives model requests (and tool calls)
             tg.start_soon(
                 run_model_service,
                 sandbox_env,
-                methods,
+                web_search_grant,
+                code_execution_grant,
+                bridge,
                 instance,
-                polling_interval,
                 started,
             )
 
@@ -330,10 +306,10 @@ async def _model_proxy_service(
             # (approver termination, fail_on_refusal, a host tool that raised)
             tg.start_soon(_monitor_failure, bridge)
 
-            # the caller's block
+            # main agent
             try:
-                yield
-                block_completed = True
+                yield bridge
+                agent_completed = True
             finally:
                 bridge.close_conversation_spans()
                 with anyio.CancelScope(shield=True):
@@ -343,32 +319,15 @@ async def _model_proxy_service(
                 # ensure the scope is cancelled
                 tg.cancel_scope.cancel()
     except Exception as ex:
-        # If the block completed successfully but we got an error during cleanup,
+        # If the agent completed successfully but we got an error during cleanup,
         # log the error but don't fail the sample.
-        if block_completed:
+        if agent_completed:
             logger.warning(
-                f"Error during {caller} cleanup (agent completed successfully): {inner_exception(ex)}"
+                f"Error during sandbox_agent_bridge cleanup (agent completed successfully): {inner_exception(ex)}"
             )
         else:
-            # Error occurred before or during the block
+            # Error occurred before or during agent execution
             raise inner_exception(ex)
-
-
-def _register_bridged_tool_specs(
-    bridge: SandboxAgentBridge, specs: Sequence[BridgedToolsSpec], port: int
-) -> None:
-    """Register each bridged tools spec with the bridge and record its MCP config."""
-    seen_names: set[str] = set()
-    for spec in specs:
-        if spec.name in seen_names:
-            raise ValueError(
-                f"Duplicate bridged_tools name: '{spec.name}'. "
-                "Each BridgedToolsSpec must have a unique name."
-            )
-        seen_names.add(spec.name)
-        config = _register_bridged_tools(bridge, spec, port)
-        bridge.mcp_server_configs.append(config)
-    bridge.warn_indistinct_tools()
 
 
 def _register_bridged_tools(

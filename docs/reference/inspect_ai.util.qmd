@@ -60,7 +60,6 @@ description: Miscellaneous utility functions.
 ## Sandbox
 
 ### sandbox
-### bind_sandbox_environment
 ### sandbox_with
 ### sandbox_default
 ### SandboxEnvironment

@@ -28,12 +28,7 @@ description: Agent scaffolds and protocol.
 
 ### agent_bridge
 ### AgentBridge
-### BridgeConversation
-### BridgeConversationSelector
 ### sandbox_agent_bridge
-### sandbox_model_proxy
-### ModelProxy
-### ModelProxyError
 ### SandboxAgentBridge
 ### StateFilter
 ### BridgedToolsSpec
