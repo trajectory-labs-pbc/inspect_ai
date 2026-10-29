@@ -19,7 +19,10 @@ policies match that tool's own name and approvers see its own arguments. For a s
 bridge that is the bridged tool the call's execution grant will bind, whatever name
 the scaffold declared it under, and for a call made through a scaffold's dispatcher
 function it is the bridged tool the dispatcher names; a `modify` decision is mapped
-back onto the call the scaffold receives.
+back onto the call the scaffold receives. Likewise a call to a tool the model was shown
+under another name than the scaffold declared it (`review_names`, from the Responses
+bridge's client tool discovery) is reviewed under the scaffold's name, unless it
+resolves to a bridged tool, which is reviewed under that tool's own name.
 """
 
 import sys
@@ -27,7 +30,7 @@ from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, NoReturn, Sequence
 
 from inspect_ai._sentinel._context import checks_tool_calls
 from inspect_ai._util.format import format_function_call
@@ -119,6 +122,7 @@ async def apply_bridge_tool_approval(
     producer: Produced | None = None,
     execution_ids: Sequence[str] | None = None,
     span_ids: Sequence[str | None] | None = None,
+    review_names: Mapping[str, str] | None = None,
 ) -> BridgeApproval:
     """Approve the tool calls in a bridged model response.
 
@@ -177,6 +181,11 @@ async def apply_bridge_tool_approval(
             proposing `ModelEvent`'s, where a `ModelEventSink` placed it
             elsewhere), so they share the run's conversation. `None` for a
             call, or for all, records them in the current span.
+        review_names: Name each call is reviewed under, keyed by the name the
+            model called, for tools the model is shown under another name than
+            the scaffold declared. Applies only to an approver's review of a call
+            reviewed as itself (`AgentBridge.reviewed_calls` resolved it to no
+            other tool); calls with other names are reviewed as called.
 
     Returns:
         The response for the scaffold, plus the messages to replay to the model when
@@ -226,8 +235,20 @@ async def apply_bridge_tool_approval(
                 for target, bridged_tool in zip(
                     reviewed_calls.calls, reviewed_calls.targets
                 ):
-                    reviewed = deepcopy(target)
-                    shown = deepcopy(target)
+                    # a call reviewed as itself, to a tool the model was shown
+                    # under another name, is reviewed under the scaffold's name
+                    review_name = (
+                        (review_names or {}).get(target.function)
+                        if target.function == call.function
+                        else None
+                    )
+                    review_target = (
+                        replace(target, function=review_name)
+                        if review_name is not None
+                        else target
+                    )
+                    reviewed = deepcopy(review_target)
+                    shown = deepcopy(review_target)
                     approved, approval = await apply_tool_approval(
                         message,
                         reviewed,
@@ -289,8 +310,12 @@ async def apply_bridge_tool_approval(
                         modified[index] = reviewed_calls.dispatch(
                             approval.modified.arguments
                         )
+                        # the sentinel reviews the call under the name it was
+                        # handed, as for an unmodified call
                         selected_reviewed = replace(
-                            shown, arguments=approval.modified.arguments
+                            shown,
+                            function=target.function,
+                            arguments=approval.modified.arguments,
                         )
             sentinel_reviewed.append(
                 list(

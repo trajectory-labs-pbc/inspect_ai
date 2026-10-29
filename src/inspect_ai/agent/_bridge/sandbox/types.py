@@ -19,6 +19,7 @@ from inspect_ai.agent._bridge.types import (
     BridgedToolId,
     DispatchedCall,
     ReviewedCalls,
+    StateFilter,
     _HandedCall,
     _unchanged,
 )
@@ -76,6 +77,10 @@ class SandboxAgentBridge(AgentBridge):
         model_resolver: ModelResolver | None = None,
         forward_client_headers: Mapping[str, Sequence[str]] | None = None,
         response_filter: ModelResponseFilter | None = None,
+        model_event_metadata_headers: Sequence[str] | None = None,
+        *,
+        state_filter: StateFilter | None = None,
+        accumulate_conversations: bool = False,
     ) -> None:
         super().__init__(
             state,
@@ -92,6 +97,9 @@ class SandboxAgentBridge(AgentBridge):
             allow_remote_media=allow_remote_media,
             model_resolver=model_resolver,
             response_filter=response_filter,
+            model_event_metadata_headers=model_event_metadata_headers,
+            state_filter=state_filter,
+            accumulate_conversations=accumulate_conversations,
         )
         self.port = port
         self.mcp_server_configs = mcp_server_configs or []

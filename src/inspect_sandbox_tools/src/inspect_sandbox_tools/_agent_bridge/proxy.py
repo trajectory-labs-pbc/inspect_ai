@@ -287,9 +287,11 @@ class AsyncHTTPServer:
         reason: Optional[str] = None,
     ) -> None:
         """Send an internally-generated streaming response (e.g., SSE)."""
+        # _handle_client closes the writer after every response, so advertise
+        # that lifecycle rather than inviting a client to reuse this socket.
         hdrs = {
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
+            "Connection": "close",
         }
         if headers:
             hdrs.update(headers)
@@ -762,6 +764,19 @@ def _openai_error_body(
         error.update(provider_body)
     return {"error": error}
 
+
+# The fields of a streamed reply's `message_delta.delta`: the finished message's
+# stop fields. The host builds one message for streaming and non-streaming
+# requests alike and decides these fields there, so the streaming route copies
+# each of them from that message; a streamed reply then ends as the same reply
+# sent whole does (a refusal's `stop_details`, a `container`), instead of with
+# whichever fields this route once chose to copy.
+_ANTHROPIC_MESSAGE_DELTA_FIELDS = (
+    "stop_reason",
+    "stop_sequence",
+    "stop_details",
+    "container",
+)
 
 # The inverse of `status_code_of`: every status that helper can derive from a
 # provider error body must map back to its Anthropic error type here. A status
@@ -1902,27 +1917,7 @@ async def model_proxy_server(
                             "utf-8"
                         )
 
-                    # 1. Send message_start immediately (before awaiting completion)
-                    #    so clients see data on the connection right away.
-                    message_start = {
-                        "type": "message_start",
-                        "message": {
-                            "id": f"msg_{os.urandom(12).hex()}",
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [],
-                            "model": json_body.get("model", "unknown"),
-                            "stop_reason": None,
-                            "stop_sequence": None,
-                            "usage": {
-                                "input_tokens": 0,
-                                "output_tokens": 0,
-                            },
-                        },
-                    }
-                    yield _sse_anthropic("message_start", message_start)
-
-                    # 2. Await the actual completion, sending pings to keep alive.
+                    # 1. Await the actual completion, sending pings to keep alive.
                     #    try/finally ensures the task is cancelled if the
                     #    generator is abandoned (e.g. client disconnect).
                     PING_INTERVAL_S = 5.0
@@ -1951,8 +1946,8 @@ async def model_proxy_server(
                                 pass
                         raise
 
-                    # A forwarded provider error arrives after message_start has
-                    # already been sent, so surface it as an SSE error event.
+                    # A forwarded provider error has no completion identity, so
+                    # surface it as an SSE error event without message_start.
                     error = _provider_error(completion)
                     if error is not None:
                         status = error.get("status") or _DEFAULT_ERROR_STATUS
@@ -1982,6 +1977,24 @@ async def model_proxy_server(
                             "utf-8"
                         )
                         return
+
+                    message_start = {
+                        "type": "message_start",
+                        "message": {
+                            "id": message["id"],
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [],
+                            "model": message["model"],
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                            },
+                        },
+                    }
+                    yield _sse_anthropic("message_start", message_start)
 
                     # 2. Process content blocks
                     content = message.get("content", [])
@@ -2201,8 +2214,8 @@ async def model_proxy_server(
                     message_delta_data: dict[str, Any] = {
                         "type": "message_delta",
                         "delta": {
-                            "stop_reason": message.get("stop_reason"),
-                            "stop_sequence": message.get("stop_sequence"),
+                            field: message.get(field)
+                            for field in _ANTHROPIC_MESSAGE_DELTA_FIELDS
                         },
                         "usage": {
                             "output_tokens": usage.get("output_tokens", 0),
@@ -2294,7 +2307,7 @@ async def model_proxy_server(
             json_body["model"] = model_name
 
             completion = await call_bridge_model_service_async(
-                "generate_google", json_data=json_body
+                "generate_google", json_data=json_body, headers=request["headers"]
             )
 
             error = _provider_error(completion)
