@@ -50,6 +50,11 @@ from inspect_ai._display.core.display import (
     TaskScreen,
     TaskSpec,
 )
+from inspect_ai._eval.spend_cap import (
+    SPEND_CAP_REACHED,
+    spend_cap_reached,
+    spend_cap_task,
+)
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._eval.task.scan import Scanners
 from inspect_ai._sentinel._config import (
@@ -619,7 +624,17 @@ async def _run_task(
                     error_after_write = False
                     with task_scope:
                         try:
-                            with creator_model_scope(options.model):
+                            with (
+                                spend_cap_task(
+                                    functools.partial(
+                                        task_cancel.request,
+                                        "abort",
+                                        reason=SPEND_CAP_REACHED,
+                                    )
+                                ),
+                                creator_model_scope(options.model),
+                            ):
+                                await anyio.lowlevel.checkpoint_if_cancelled()
                                 result = await task_run(
                                     options, task_cancel=task_cancel
                                 )
@@ -683,7 +698,8 @@ async def _run_task(
                             result = unwritten_task_log(
                                 options.logger,
                                 TerminateTaskError(
-                                    "Task cancelled by user "
+                                    task_cancel.reason
+                                    or "Task cancelled by user "
                                     f"({task_cancel.cancel_type})"
                                 ),
                             )
@@ -1199,6 +1215,9 @@ async def dispatch_tasks(
                             if task_retry_abandoned(record.task_id)
                         ]:
                             queue.end(abandoned, abandoned.log)
+
+                        # reaching the spend cap cancels the run
+                        cancelled = cancelled or spend_cap_reached()
 
                         # start up to the concurrency cap (model-balanced),
                         # re-reading the live `ctl config --max-tasks` override

@@ -21,10 +21,10 @@ class RecordingCheckpointer:
     """Minimal in-memory `Checkpointer` for tests.
 
     Records the callbacks registered via `track()` so a test can fire a
-    snapshot on demand (`cp.callbacks[key]()`), and optionally seeds
-    `restored` state to simulate a resume. All lifecycle methods are inert,
-    so it exercises agent/handler wiring without the real checkpointer's
-    restic/transcript machinery.
+    snapshot on demand (`cp.callbacks[key]()`), counts ticks, and optionally
+    seeds `restored` state to simulate a resume. All other lifecycle methods
+    are inert, so it exercises agent/handler wiring without the real
+    checkpointer's restic/transcript machinery.
 
     `snapshot()` captures the tracked state in JSON form, and a checkpointer
     created with `serialized=True` restores it through each key's
@@ -37,6 +37,7 @@ class RecordingCheckpointer:
         self._restored = restored or {}
         self._serialized = serialized
         self.callbacks: dict[str, Callable[[], object]] = {}
+        self.ticks = 0
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -55,7 +56,7 @@ class RecordingCheckpointer:
         return None
 
     async def tick(self) -> None:
-        return None
+        self.ticks += 1
 
     async def checkpoint(self) -> None:
         return None

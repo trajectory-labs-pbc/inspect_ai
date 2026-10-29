@@ -17,6 +17,7 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Final,
     Iterator,
     Literal,
     Mapping,
@@ -44,6 +45,7 @@ from tenacity import (
 )
 from tenacity.wait import WaitBaseT
 
+from inspect_ai._eval.spend_cap import record_spend, spend_cap_reached
 from inspect_ai._sentinel._context import is_agent_generate
 from inspect_ai._sentinel._sidecar._act import (
     act_on_judgment,
@@ -461,6 +463,14 @@ class ModelAPI(abc.ABC):
     def canonical_name(self) -> str:
         """Canonical model name for querying results."""
         return self.model_name
+
+    def reports_cost(self) -> bool:
+        """Whether the service reports what each call was charged.
+
+        A model that does needs no cost data for an eval-set spend cap: the
+        reported charge is the call's cost.
+        """
+        return False
 
     def service_model_name(self) -> str:
         """Model name used by the provider service."""
@@ -1596,6 +1606,7 @@ class Model:
             # Record and check usage
             if usage:
                 record_and_check_model_usage(self, usage, role=self.role)
+                await _deliver_spend_cap_cancellation()
 
             return compacted_messages, usage
 
@@ -2160,17 +2171,26 @@ class Model:
                     self, output.usage, role=self.role, output=output
                 )
 
-                # send telemetry to hooks
-                await emit_model_usage(
-                    model_name=str(self), usage=output.usage, call_duration=output.time
-                )
-                await send_telemetry_legacy(
-                    "model_usage",
-                    json.dumps(dict(model=str(self), usage=output.usage.model_dump())),
-                )
+                # send telemetry to hooks. The call that reaches the spend cap
+                # has already cancelled its own task: shield the hooks so they
+                # still hear about it, and the cache write below still runs.
+                with anyio.CancelScope(shield=spend_cap_reached()):
+                    await emit_model_usage(
+                        model_name=str(self),
+                        usage=output.usage,
+                        call_duration=output.time,
+                    )
+                    await send_telemetry_legacy(
+                        "model_usage",
+                        json.dumps(
+                            dict(model=str(self), usage=output.usage.model_dump())
+                        ),
+                    )
 
             if cache_policy and cache_entry:
                 cache_store(entry=cache_entry, output=output)
+
+            await _deliver_spend_cap_cancellation()
 
             return output, event
 
@@ -2474,6 +2494,7 @@ class Model:
             cache=cache,
             call=call,
             pending=output is None,
+            metadata=model_event_metadata(),
         )
         # at creation, so a request still in flight counts as sent; the
         # snapshot, so history keeps a message as sent, as the log does
@@ -3497,6 +3518,7 @@ async def log_model_retry(
         wait_time=retry_state.upcoming_sleep,
         exception_type=exception_type,
         status_code=status_code,
+        qualified_model_name=qualified_model_name,
     )
 
 
@@ -3832,6 +3854,76 @@ def requested_model(name: str) -> Iterator[None]:
         _requested_model.reset(token)
 
 
+BRIDGE_REQUESTED_MODEL: Final = "bridge_requested_model"
+"""`ModelEvent.metadata` key: the model name the bridged client asked for.
+
+Alias resolution can map a client-requested name onto a different Inspect model
+(e.g. codex's hardcoded `codex-auto-review` guardian slug onto the eval model),
+which otherwise erases the requested name from the transcript -- leaving
+reviewer turns indistinguishable from the agent's own.
+
+Absent on events whose request was not bridged or carried no model name:
+consumers must treat absence as "not aliased" (the event's `model` is what the
+client asked for), never as "unknown".
+"""
+
+BRIDGE_FILTER_SYNTHETIC: Final = "bridge_filter_synthetic"
+"""`ModelEvent.metadata` key: `True` when a bridge filter produced this output.
+
+No provider request was made (`call` is `None`), but the scaffold consumed the
+output, so the event exists to keep the resulting assistant message traceable.
+"""
+
+BRIDGE_REQUEST_HEADERS: Final = "bridge_request_headers"
+"""`ModelEvent.metadata` key: selected client request headers for a bridge call.
+
+Present only when a bridge opted into individual non-sensitive header names and
+the request supplied at least one of them. The mapping's lower-case keys are
+the configured names; it never contains unselected request headers.
+"""
+
+
+_model_event_metadata: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_model_event_metadata", default=None
+)
+
+
+def model_event_metadata() -> dict[str, Any] | None:
+    """Extra metadata stamped onto `ModelEvent`s emitted in the current context.
+
+    Returns a copy so a caller mutating the result cannot retroactively alter
+    events already constructed from the same context.
+    """
+    metadata = _model_event_metadata.get()
+    return dict(metadata) if metadata is not None else None
+
+
+@contextlib.contextmanager
+def use_model_event_metadata(metadata: dict[str, Any] | None) -> Iterator[None]:
+    """Stamp *metadata* onto every `ModelEvent` emitted in this block.
+
+    Merges over (and overrides key collisions with) any metadata installed by
+    an enclosing block. Works identically for transcript-emitted events and
+    events routed through a `ModelEventSink` — the stamp happens at event
+    construction, before routing. Passing `None` or `{}` is a no-op.
+
+    The agent bridge uses this to preserve the client-requested model name on
+    bridged generates: alias resolution (e.g. codex's `codex-auto-review`
+    guardian slug onto the eval model) otherwise erases the requested name
+    from the transcript entirely, leaving reviewer and agent turns
+    indistinguishable.
+    """
+    if not metadata:
+        yield
+        return
+    merged = {**(_model_event_metadata.get() or {}), **metadata}
+    token = _model_event_metadata.set(merged)
+    try:
+        yield
+    finally:
+        _model_event_metadata.reset(token)
+
+
 # shared contexts for asyncio tasks
 def set_total_messages(input: str | list[ChatMessage]) -> None:
     from inspect_ai.log._samples import set_active_sample_total_messages
@@ -3930,11 +4022,14 @@ def record_and_check_model_usage(
     # full "provider/model" identifier, used as the usage-bookkeeping dict key
     model_name = f"{model}"
 
-    # compute cost and set on usage before recording (so ModelUsage.__add__
-    # accumulates it in the per-model usage dicts)
-    total_cost = model_usage_cost(model, usage, output)
-    if total_cost is not None:
-        usage.total_cost = total_cost
+    # set cost on usage before recording (so ModelUsage.__add__ accumulates it
+    # in the per-model usage dicts). A charge the provider reported is what the
+    # call cost; cost data only estimates it, so it applies when none came.
+    total_cost = usage.total_cost
+    if total_cost is None:
+        total_cost = model_usage_cost(model, usage, output)
+        if total_cost is not None:
+            usage.total_cost = total_cost
 
     _add_model_usage(model_name, usage, role)
 
@@ -3949,10 +4044,16 @@ def record_and_check_model_usage(
     if total_cost is not None:
         record_model_cost(total_cost)
 
+    record_spend(model_name, total_cost)
+
     # before the checks, so the control channel sees the usage that tripped
     # a limit
     _show_sample_usage(cost=total_cost is not None)
 
+    # the spend cap cancels the task without scoring, so it takes priority
+    # over a sample limit (which would score the sample)
+    if spend_cap_reached():
+        return
     check_token_limit()
     if total_cost is not None:
         check_cost_limit()
@@ -4003,6 +4104,16 @@ def _show_sample_usage(cost: bool) -> None:
     set_active_sample_token_limit_usage(token_limit_usage())
     if cost:
         set_active_sample_total_cost(sample_total_cost())
+
+
+async def _deliver_spend_cap_cancellation() -> None:
+    """Raise the spend cap's task cancellation before the caller continues.
+
+    A cancelled task runs on until its next suspension. Suspending here stops
+    the call's caller from doing more work with a result the cap has cut off.
+    """
+    if spend_cap_reached():
+        await anyio.lowlevel.checkpoint()
 
 
 def model_usage_cost(

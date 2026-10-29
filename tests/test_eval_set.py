@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Iterator
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, ClassVar, cast
+from typing import Any, BinaryIO, Callable, ClassVar, Generator, cast
 from unittest.mock import patch
 
 import anyio
@@ -54,7 +54,7 @@ from inspect_ai._eval.evalset import (
 )
 from inspect_ai._eval.loader import resolve_tasks
 from inspect_ai._eval.task.resolved import ResolvedTask
-from inspect_ai._eval.task.task import task_with
+from inspect_ai._eval.task.task import PreviousTask, task_with
 from inspect_ai._util.asyncfiles import AsyncFilesystem
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import basename, filesystem, local_path, size_in_mb
@@ -88,8 +88,18 @@ from inspect_ai.log._recorders.buffer.database import (
 )
 from inspect_ai.log._recorders.eval import LogStart, ZipLogFile
 from inspect_ai.log._recorders.types import SampleEvent
-from inspect_ai.model import CachePolicy, Model, ModelOutput, get_model
+from inspect_ai.model import (
+    CachePolicy,
+    Model,
+    ModelCost,
+    ModelInfo,
+    ModelOutput,
+    ModelUsage,
+    get_model,
+    set_model_info,
+)
 from inspect_ai.model._generate_config import GenerateConfig
+from inspect_ai.model._model_info import clear_model_info_cache
 from inspect_ai.scorer import (
     Metric,
     SampleScore,
@@ -112,6 +122,270 @@ from inspect_ai.util import (
 )
 from inspect_ai.util._limit import TokenLimit
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
+
+
+def _spend_model(calls: list[str], reported: float | None = None) -> Model:
+    """A model whose calls use 1,000 input tokens and report `reported` as their charge."""
+
+    def output(*args: Any) -> ModelOutput:
+        calls.append("call")
+        result = ModelOutput.from_content("mockllm/spend", "answer")
+        result.usage = ModelUsage(
+            input_tokens=1000, output_tokens=0, total_tokens=1000, total_cost=reported
+        )
+        return result
+
+    return get_model("mockllm/spend", custom_outputs=output)
+
+
+def _spend_task(name: str = "spend", samples: int = 6) -> Task:
+    return Task(
+        name=name,
+        dataset=[
+            Sample(id=i, input="question", target="answer") for i in range(samples)
+        ],
+        solver=generate(),
+        scorer=exact(),
+    )
+
+
+@pytest.fixture
+def spend_model_prices() -> Generator[dict[str, ModelCost], None, None]:
+    set_model_info("mockllm/spend", ModelInfo())
+    try:
+        yield {
+            "mockllm/spend": ModelCost(
+                input=10, output=10, input_cache_read=0, input_cache_write=0
+            )
+        }
+    finally:
+        clear_model_info_cache()
+
+
+@pytest.fixture
+def spend_model_priced() -> Generator[None, None, None]:
+    """Price mockllm/spend so that each 1,000-token call costs $0.01."""
+    set_model_info(
+        "mockllm/spend",
+        ModelInfo(
+            cost=ModelCost(input=10, output=10, input_cache_read=0, input_cache_write=0)
+        ),
+    )
+    try:
+        yield
+    finally:
+        clear_model_info_cache()
+
+
+@pytest.mark.usefixtures("spend_model_priced")
+@pytest.mark.parametrize("retry_immediate", [False, True])
+@pytest.mark.parametrize("file_uri", [False, True])
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+def test_spend_cap_cancels_without_scoring_and_resumes(
+    tmp_path: Path,
+    retry_immediate: bool,
+    file_uri: bool,
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    monkeypatch.setenv("INSPECT_ASYNC_BACKEND", backend)
+    calls: list[str] = []
+    model = _spend_model(calls)
+    tasks = [_spend_task()]
+    log_dir = tmp_path.as_uri() if file_uri else str(tmp_path)
+
+    def run(cap: float) -> tuple[bool, list[EvalLog]]:
+        return eval_set(
+            tasks,
+            model=model,
+            log_dir=log_dir,
+            spend_cap=cap,
+            max_samples=1,
+            display="none",
+            retry_immediate=retry_immediate,
+            retry_wait=0.001,
+        )
+
+    success, logs = run(0.025)
+
+    assert not success
+    assert len(calls) == 3
+    log = read_eval_log(logs[0].location)
+    assert log.status == "error"
+    assert log.error is not None and "spend cap reached" in log.error.message
+    samples = log.samples
+    assert samples is not None
+    assert sum(bool(sample.scores) for sample in samples) == 2
+    unfinished = [sample for sample in samples if not sample.scores]
+    assert unfinished and unfinished[0].messages
+    saved = tmp_path / SPEND_FILE
+    assert json.loads(saved.read_text())["spent_usd"] == pytest.approx(0.03)
+
+    with pytest.raises(PrerequisiteError, match="already spent"):
+        run(0.025)
+    assert len(calls) == 3
+    assert json.loads(saved.read_text())["spent_usd"] == pytest.approx(0.03)
+
+    success, logs = run(0.1)
+
+    assert success
+    assert len(calls) == 7
+    samples = read_eval_log(logs[0].location).samples
+    assert samples is not None and len(samples) == 6
+    assert all(sample.scores for sample in samples)
+    assert json.loads(saved.read_text())["spent_usd"] == pytest.approx(0.07)
+
+    success, _ = eval_set(
+        _spend_task(), model=model, log_dir=str(tmp_path / "uncapped"), display="none"
+    )
+    assert success
+    assert not (tmp_path / "uncapped" / SPEND_FILE).exists()
+
+
+@pytest.mark.usefixtures("spend_model_priced")
+@pytest.mark.parametrize("retry_immediate", [False, True])
+def test_spend_cap_stops_queued_tasks(tmp_path: Path, retry_immediate: bool) -> None:
+    calls: list[str] = []
+    success, logs = eval_set(
+        [_spend_task(f"spend-{i}", samples=2) for i in range(3)],
+        model=_spend_model(calls),
+        spend_cap=0.025,
+        log_dir=str(tmp_path),
+        max_tasks=1,
+        max_samples=1,
+        retry_immediate=retry_immediate,
+        retry_wait=0.001,
+        display="none",
+    )
+
+    assert not success
+    assert len(calls) == 3
+    assert [log.eval.task for log in logs] == ["spend-0", "spend-1"]
+    assert [log.status for log in logs] == ["success", "error"]
+
+
+def test_spend_cap_counts_the_charge_a_provider_reports(
+    tmp_path: Path, spend_model_prices: dict[str, ModelCost]
+) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    # cost data prices each call at $0.01; the provider says it charged $0.03
+    calls: list[str] = []
+    success, logs = eval_set(
+        _spend_task(),
+        model=_spend_model(calls, reported=0.03),
+        model_cost_config=spend_model_prices,
+        spend_cap=0.025,
+        log_dir=str(tmp_path),
+        max_samples=1,
+        display="none",
+    )
+
+    assert not success
+    assert len(calls) == 1
+    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.03
+    usage = read_eval_log(logs[0].location).stats.model_usage["mockllm/spend"]
+    assert usage.total_cost == 0.03
+
+
+@pytest.mark.usefixtures("spend_model_priced")
+def test_spend_cap_counts_failed_sample_attempts(tmp_path: Path) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    attempts = 0
+
+    @solver
+    def fail_first_attempt() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            nonlocal attempts
+            attempts += 1
+            state = await generate(state)
+            if attempts == 1:
+                raise RuntimeError("retry this sample")
+            return state
+
+        return solve
+
+    calls: list[str] = []
+    task = _spend_task()
+    task.solver = fail_first_attempt()
+    success, logs = eval_set(
+        task,
+        model=_spend_model(calls),
+        spend_cap=0.015,
+        retry_on_error=1,
+        max_samples=1,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+
+    assert not success
+    assert attempts == len(calls) == 2
+    samples = read_eval_log(logs[0].location).samples
+    assert samples and all(not sample.scores for sample in samples)
+    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.02
+
+
+@pytest.mark.usefixtures("spend_model_priced")
+def test_spend_cap_cancels_concurrent_samples(tmp_path: Path) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    ready = anyio.Event()
+    started = 0
+
+    @solver
+    def wait_for_peers() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            nonlocal started
+            started += 1
+            if started >= 3:
+                ready.set()
+            with anyio.fail_after(30):
+                await ready.wait()
+            for _ in range(3):
+                state = await generate(state)
+            return state
+
+        return solve
+
+    calls: list[str] = []
+    tasks = [_spend_task(f"spend-{i}") for i in range(3)]
+    for eval_task in tasks:
+        eval_task.solver = wait_for_peers()
+    success, logs = eval_set(
+        tasks,
+        model=_spend_model(calls),
+        spend_cap=0.015,
+        max_tasks=2,
+        max_samples=3,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+
+    assert not success
+    assert started >= 3
+    assert all(log.eval.task != "spend-2" for log in logs)
+    assert all(
+        not sample.scores
+        for log in logs
+        for sample in (read_eval_log(log.location).samples or [])
+    )
+    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] >= 0.015
+
+
+def test_spend_cap_requires_cost_data_for_task_models(tmp_path: Path) -> None:
+    calls: list[str] = []
+    with pytest.raises(PrerequisiteError, match="spend_cap requires cost data"):
+        eval_set(
+            _spend_task(),
+            model=_spend_model(calls),
+            spend_cap=1,
+            log_dir=str(tmp_path),
+            display="none",
+        )
+    assert calls == []
 
 
 @pytest.mark.parametrize("retry_immediate", [False, True])
@@ -1144,9 +1418,11 @@ def test_eval_set_previous_task_keeps_resolved_sandbox(
             recover_crashed=False,
         )[0]
     else:
-        previous_task = _resumed_task(
+        resumed_task = _resumed_task(
             resolved, task_identifier(header, None), log_info.name
         )
+        assert isinstance(resumed_task, PreviousTask)
+        previous_task = resumed_task
 
     resumed = resolve_tasks(
         previous_task,

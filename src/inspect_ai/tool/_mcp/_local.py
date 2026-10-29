@@ -124,6 +124,13 @@ class MCPServerLocal(MCPServer):
         self._name = name
         self._events = events
         self._timeout = timeout
+        # Per-instance session table keyed by scope (see _session_scope): the
+        # running sample attempt when there is one, else the current task.
+        # Storing it on the instance (rather than the class) means a
+        # completed sample's or dead task's identity can't leak one sample's
+        # cached session — including its cached tool list — into another
+        # sample. Weak keys evict an entry as soon as its scope object is
+        # collected, so a session a task never entered doesn't outlive it.
         self._task_sessions: WeakKeyDictionary[object, "MCPServerLocalSession"] = (
             WeakKeyDictionary()
         )
@@ -145,36 +152,56 @@ class MCPServerLocal(MCPServer):
     async def tools(self) -> list[Tool]:
         return await self._task_session().tools()
 
-    # create a separate MCPServer session per async task, keyed by the running
-    # task OBJECT, rather than per sample. A handoff/subagent's turn, including
-    # its own tools() resolution, runs in its own child task, so it gets a
-    # fresh connection (empty state, for a stateful server) rather than the
-    # parent's live session. That isolation is intentional (see CHANGELOG),
-    # not a safety requirement: concurrent call_tool on one ClientSession is
-    # safe in the mcp SDK.
-    #
-    # Keying by task id would be both stale and unbounded: anyio's
-    # TaskInfo.id is id()-derived, so an id is reusable once its task is
-    # collected, and a session created but never entered (a plain solver
-    # eval only calls tools()) is never evicted. Weak keys make entries die
-    # with their task instead.
+    def _session_scope(self) -> object:
+        """Identity that owns one server process.
+
+        The running **sample attempt** (``ActiveSample``), when there is one.
+        A stdio MCP server is a process inside that sample's sandbox, so the
+        sample attempt is its natural lifetime — and it is the isolation
+        boundary that matters: distinct attempts (concurrent epochs, retries)
+        get distinct objects, so tools can never bind across samples.
+
+        Keying on the current task instead made every task that touched the
+        tool source miss the table and launch another server: the agent
+        bridge serves each tool call from its own task, so one sample paid the
+        exec+import+handshake cost 8-9 times (measured in-sandbox), which is a
+        large share of the event-loop starvation seen at hundreds of concurrent
+        sandboxes. Bridge request tasks descend from the sample's task group,
+        so they observe the same ActiveSample and now share its session.
+
+        A *completed* ActiveSample is not a valid scope: a child task that
+        outlives its sample must not resurrect a server in a torn-down sandbox.
+        Such a task falls back to task scope and fails against a closed
+        session, which is the intended loud failure.
+
+        Outside a sample (bare ``mcp_connection`` in tests or tooling) the
+        current task is the scope, preserving the previous behaviour.
+        """
+        from inspect_ai.log._samples import sample_active
+
+        active = sample_active()
+        if active is not None and active.completed is None:
+            return active
+        return _current_task()
+
     def _task_session(self) -> "MCPServerLocalSession":
-        task = _current_task()
-        session = self._task_sessions.get(task)
+        scope = self._session_scope()
+        session = self._task_sessions.get(scope)
         if session is None:
             session = MCPServerLocalSession(
                 self._client,
                 name=self._name,
                 events=self._events,
                 timeout=self._timeout,
+                owner=self,
             )
-            self._task_sessions[task] = session
+            self._task_sessions[scope] = session
         return session
 
 
 @dataclass
 class _Connection:
-    """A connection held open by this session's entries in one task."""
+    """A connection held open by this session's entries in one scope."""
 
     session: ClientSession
     exit_stack: AsyncExitStack
@@ -190,12 +217,17 @@ class MCPServerLocalSession(MCPServer):
         name: str,
         events: bool,
         timeout: int | None = None,
+        owner: "MCPServerLocal | None" = None,
     ) -> None:
         super().__init__()
         self._client = client
         self._name = name
         self._events = events
         self._timeout = timeout
+        # The MCPServerLocal that created this session, used to re-resolve the
+        # CURRENT session when a tool closure outlives the one that made it
+        # (see _client_session).
+        self._owner = owner
         # Set only once initialize() has succeeded, so tools called from
         # another task never see a connection that is still handshaking or
         # being torn down.
@@ -343,16 +375,39 @@ class MCPServerLocalSession(MCPServer):
             parameters=parameters,
         )
 
-    # if we have been entered as a context manager then return that session,
-    # otherwise, create a brand new session from the client
+    # if we have been entered as a context manager then return that session;
+    # otherwise adopt the scope's current session, and only as a last resort
+    # create a brand new one from the client
     @contextlib.asynccontextmanager
     async def _client_session(self) -> AsyncIterator[ClientSession]:
         conn = self._conn
         if conn is not None:
             yield conn.session
-        else:
-            async with AsyncExitStack() as exit_stack:
-                yield await self._connect(exit_stack)
+            return
+
+        # A tool closure outlives the session that produced it: `tools()` binds
+        # each Tool to `self`, and callers hold those closures well past the
+        # connection that resolved them -- the sandbox agent bridge registers
+        # them once and then invokes them per request. Falling straight through
+        # to a private client here started a whole MCP server process per tool
+        # call, bypassing the session table entirely (measured in-sandbox: five
+        # server launches for four tool calls, none of them exiting until the
+        # call returned).
+        #
+        # Re-resolve through the owner instead, which returns the session for
+        # the CURRENT scope -- the live one for this sample when there is one.
+        # Only when that also has no connection do we fall back to a private
+        # client, which keeps a call arriving after its sample has finished
+        # (e.g. trailing scoring) working rather than raising.
+        adopted = self._current_scope_session()
+        if adopted is not None:
+            yield adopted
+            return
+
+        # otherwise, create a new session and yield it (it will be cleaned up
+        # when the context manager exits)
+        async with AsyncExitStack() as exit_stack:
+            yield await self._connect(exit_stack)
 
     async def _connect(self, exit_stack: AsyncExitStack) -> ClientSession:
         """Open the transport and an initialized session on `exit_stack`."""
@@ -365,6 +420,17 @@ class MCPServerLocalSession(MCPServer):
         with trace_action(logger, "MCPServer", f"initialize session ({self._name})"):
             await session.initialize()
         return session
+
+    def _current_scope_session(self) -> ClientSession | None:
+        """The live ClientSession for the current scope, if there is one."""
+        owner = self._owner
+        if owner is None:
+            return None
+        current = owner._task_session()
+        if current is self:
+            return None
+        conn = current._conn
+        return conn.session if conn is not None else None
 
     def _sampling_fn(self) -> SamplingFnT | None:
         from inspect_ai.model._model import active_model

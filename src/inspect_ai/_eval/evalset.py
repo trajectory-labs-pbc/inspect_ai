@@ -126,6 +126,7 @@ from .eval import eval, eval_init, eval_resolve_tasks
 from .eval_set_manifest import (
     INSPECT_EVAL_SET_CAPTURE,
     EvalSetCaptureScan,
+    TaskLogVerdict,
     build_eval_set_capture,
     eval_set_capture_requested,
     samples_selected,
@@ -152,6 +153,7 @@ from .eval_set_selection import (
     read_eval_set_selection,
 )
 from .loader import resolve_task_args, solver_from_spec
+from .spend_cap import SpendCap, spend_cap_scope, validate_spend_cap
 from .task import Epochs
 from .task.resolved import ResolvedTask, resolved_task_names
 from .task.scan import scan_context
@@ -372,6 +374,7 @@ def eval_set(
     embed_viewer: bool = False,
     sentinel: SentinelSpec | None = None,
     sentinel_proxy: SentinelProxy | None = None,
+    spend_cap: float | None = None,
     **kwargs: Unpack[GenerateConfigArgs],
 ) -> tuple[bool, list[EvalLog]]:
     r"""Evaluate a set of tasks.
@@ -545,6 +548,12 @@ def eval_set(
             A protocol, a list or mapping of monitors and protocols with at least one protocol, a config file path or registered protocol name, or a parsed configuration. Monitors alone are an error: wrap them in `observe_only()` to record without acting.
             Overrides the task's sentinel. Defaults to no sentinel.
         sentinel_proxy: Whether to look for a sentinel sidecar behind each model's proxy, which then judges the agent's model calls. Off unless set: `off` (the default) never looks, `auto` uses a sidecar it finds, and `required` fails a task unless one is found. Only an Anthropic, OpenAI or OpenAI-compatible model whose base URL was set is probed. Experimental: not yet a stable API; may change without notice.
+        spend_cap: Limit on total model spend (in dollars) across the eval set,
+            including retries and resumes. Cancels unfinished work without
+            scoring. Calls already in flight can exceed the cap. Requires cost
+            data for every task and role model, via set_model_cost() or
+            `model_cost_config`; other models that task code calls are
+            uncounted when they have none.
         **kwargs: Model generation options.
 
     Returns:
@@ -609,6 +618,7 @@ def eval_set(
     # of them is an attempt this process ran and knows has ended, which is what
     # lets the retry-cleanup sweep remove it (see latest_completed_task_eval_logs)
     run_ids: set[str] = set()
+    spend: SpendCap | None = None
 
     def run_eval(
         eval_set_id: str,
@@ -616,9 +626,25 @@ def eval_set(
         | list[PreviousTask]
         | list[ResolvedTask | PreviousTask],
         eval_set_tasks: list[str],
-        selection_mode: bool = False,
+        selection_completion: Literal["runner", "definition"] | None = None,
         solver_override: Solver | None = None,
     ) -> list[EvalLog]:
+        # a worker's completion policy (see eval_set_selection.py); None outside
+        # selection mode
+        if selection_completion is None:
+            retries = task_retry_attempts
+        elif selection_completion == "runner":
+            retries = 0
+        else:
+            # immediate whatever `retry_immediate` says: batch retry is eval-set
+            # orchestration, which a worker skips. The attempt total still
+            # matches: batch retry's `retry_attempts` counts the first attempt
+            retries = (
+                num_retry_attempts
+                if retry_immediate
+                else max(num_retry_attempts - 1, 0)
+            )
+
         # run evals
         results = eval(
             tasks=tasks,
@@ -651,7 +677,7 @@ def eval_set(
             sample_id=sample_id,
             sample_shuffle=sample_shuffle,
             epochs=epochs,
-            fail_on_error=False if selection_mode else fail_on_error,
+            fail_on_error=False if selection_completion == "runner" else fail_on_error,
             continue_on_fail=continue_on_fail,
             retry_on_error=retry_on_error,
             score_on_error=score_on_error,
@@ -679,7 +705,7 @@ def eval_set(
             score=score,
             score_display=score_display,
             eval_set_id=eval_set_id,
-            task_retry_attempts=0 if selection_mode else task_retry_attempts,
+            task_retry_attempts=retries,
             # On in selection mode, and not an override a definition can
             # decline. A selection-mode worker is detached: human input
             # dispatches ACP -> Textual panel -> console, and with no display
@@ -691,8 +717,13 @@ def eval_set(
             # to the caller: of the definition shapes an external runner drives,
             # only some can pass the flag at all. A failed bind fails the
             # worker (see `acp_server`) rather than degrading, because the
-            # channel it would degrade to is the dead end above.
-            acp_server=True if selection_mode else acp_server,
+            # channel it would degrade to is the dead end above. A transport
+            # the definition passes (a port, `host:port` or socket path) is
+            # kept, so a runner that reaches its workers over TCP can attach;
+            # anything that would leave ACP off binds the default socket.
+            acp_server=(acp_server or True)
+            if selection_completion is not None
+            else acp_server,
             # Demoted to a plain on/off: eval-set owns the keep-alive park
             # itself (after the display closes), so the inner eval() must
             # not park inside the task display. See the park below.
@@ -704,11 +735,15 @@ def eval_set(
         # check for cancelled: a cancelled log, or a requested task with no
         # log (it was still queued when the run was cancelled). A task whose
         # retry an operator abandoned in an earlier pass is ended with no log
-        # and no attempt; that is not a cancellation of the run.
+        # and no attempt; that is not a cancellation of the run. Nor is a task
+        # still queued when the spend cap stopped the run.
         returned = {log.eval.task_id for log in results}
-        if evals_cancelled(results) or any(
-            task.id not in returned and not task_retry_abandoned(task.id)
-            for task in tasks
+        if evals_cancelled(results) or (
+            not (spend is not None and spend.tripped)
+            and any(
+                task.id not in returned and not task_retry_abandoned(task.id)
+                for task in tasks
+            )
         ):
             raise KeyboardInterrupt
 
@@ -720,6 +755,13 @@ def eval_set(
     # are never active at once.
     capture_path = eval_set_capture_requested()
     selection_path = eval_set_selection_requested()
+    if spend_cap is not None:
+        validate_spend_cap(spend_cap)
+        if selection_path is not None:
+            raise PrerequisiteError(
+                "spend_cap is not supported with eval-set selection workers; "
+                "a shared cap across processes requires external accounting."
+            )
     if capture_path is not None and selection_path is not None:
         raise PrerequisiteError(
             f"{INSPECT_EVAL_SET_CAPTURE} and {INSPECT_EVAL_SET_SELECTION} "
@@ -756,7 +798,7 @@ def eval_set(
         max_tasks=max_tasks,
         # error handling as the definition asked for it, so a runner can see
         # what selection mode honours (retry_on_error) and what it overrides
-        # (fail_on_error) rather than guessing.
+        # under `completion="runner"` (fail_on_error) rather than guessing.
         fail_on_error=fail_on_error,
         continue_on_fail=continue_on_fail,
         retry_on_error=retry_on_error,
@@ -766,6 +808,8 @@ def eval_set(
         # that with is the capture's top-level `scan` field, not this bool).
         scanners=scanner is not None,
     )
+    if spend_cap is not None:
+        definition_options["spend_cap"] = spend_cap
 
     # a runner may override how this run is operated, run-wide (read in capture
     # mode too, so the manifest describes the run that actually happens) and
@@ -863,6 +907,15 @@ def eval_set(
         log_refusals=log_refusals,
         **kwargs,
     )
+    # resolve log_dir, matching eval(). below `definition_options`, so a capture
+    # manifest records the options *the definition passed*: a definition that
+    # named no directory is reported as having named none rather than as
+    # having named this default. absolute_file_path() is likewise not applied
+    # -- eval() does it, but doing it here would change the recorded location
+    # of every relative log_dir an eval set already uses
+    if log_dir is None:
+        log_dir = os.environ.get("INSPECT_LOG_DIR", "./logs")
+
     # capture mode: resolve tasks, write the manifest, and exit the process
     # without running anything. deliberately placed before any log_dir side
     # effects (mkdir, .eval-set-id, eval-set.json) and before eval-set hooks.
@@ -900,18 +953,19 @@ def eval_set(
             if captured is not None
             else None
         )
+        capture_args = EvalSetArgsInTaskIdentifier(
+            config=capture_config,
+            solver=solver,
+            message_limit=message_limit,
+            token_limit=token_limit,
+            turn_limit=turn_limit,
+            time_limit=time_limit,
+            working_limit=working_limit,
+            cost_limit=cost_limit,
+        )
         capture = build_eval_set_capture(
             capture_tasks,
-            EvalSetArgsInTaskIdentifier(
-                config=capture_config,
-                solver=solver,
-                message_limit=message_limit,
-                token_limit=token_limit,
-                turn_limit=turn_limit,
-                time_limit=time_limit,
-                working_limit=working_limit,
-                cost_limit=cost_limit,
-            ),
+            capture_args,
             epochs=epochs,
             limit=limit,
             sample_id=sample_id,
@@ -919,20 +973,22 @@ def eval_set(
             options=definition_options,
             overrides=overrides,
             scan=capture_scan,
+            task_logs=_captured_task_logs(
+                capture_tasks,
+                capture_args,
+                log_dir,
+                epochs=epochs,
+                limit=limit,
+                sample_id=sample_id,
+                sample_shuffle=sample_shuffle,
+            ),
         )
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))
         raise SystemExit(0)
 
-    # resolve log_dir, matching eval(). deliberately below the capture branch,
-    # which exits before any log_dir side effect: a capture manifest records
-    # the options *the definition passed*, so a definition that named no
-    # directory must be reported as having named none rather than as having
-    # named this default. absolute_file_path() is likewise not applied -- eval()
-    # does it, but doing it here would change the recorded location of every
-    # relative log_dir an eval set already uses
-    if log_dir is None:
-        log_dir = os.environ.get("INSPECT_LOG_DIR", "./logs")
+    if spend_cap is not None:
+        spend = SpendCap(spend_cap, log_dir)
 
     # ensure log_dir
     fs = filesystem(log_dir)
@@ -996,11 +1052,17 @@ def eval_set(
             cost_limit=cost_limit,
         )
 
+        if selection.completion == "definition":
+            from inspect_ai.log._recover import resolve_incomplete_max
+
+            incomplete_max = resolve_incomplete_max(incomplete_action, incomplete_max)
+
         # same run-boundary cleanup the eval-set path does in its own `finally`
         # below: the inner eval() runs with eval_set_id set, so it leaves both
         # the keep-alive park and the registry reset to its caller.
         def run_selection(selection_input: Tasks) -> tuple[bool, list[EvalLog]]:
             resolved = resolve_selection_tasks(selection_input)
+            task_names = resolved_task_names(resolved)
             return _run_eval_set_selection(
                 selection,
                 resolved,
@@ -1008,14 +1070,24 @@ def eval_set(
                 lambda worker_eval_set_id, worker_tasks: run_eval(
                     worker_eval_set_id,
                     worker_tasks,
-                    resolved_task_names(resolved),
-                    selection_mode=True,
+                    task_names,
+                    selection_completion=selection.completion,
                     # after matching, which used the definition's solver
                     solver_override=empty_attempt()
                     if selection.empty_attempt
                     else None,
                 ),
                 log_dir,
+                _DefinitionCompletion(
+                    incomplete_action=incomplete_action,
+                    incomplete_max=incomplete_max,
+                    epochs=resolve_epochs(epochs),
+                    limit=limit,
+                    sample_id=sample_id,
+                    task_names=task_names,
+                )
+                if selection.completion == "definition"
+                else None,
             )
 
         try:
@@ -1283,7 +1355,11 @@ def eval_set(
 
     # create retry policy
     retry = Retrying(
-        retry=retry_if_not_result(all_evals_succeeded),
+        retry=retry_if_not_result(
+            lambda logs: (
+                all_evals_succeeded(logs) or (spend is not None and spend.tripped)
+            )
+        ),
         retry_error_callback=return_last_value,
         reraise=True,
         stop=stop_after_attempt(num_retry_attempts),
@@ -1308,12 +1384,13 @@ def eval_set(
             # emit start event
             run_coroutine(emit_eval_set_start(eval_set_id, log_dir))
 
-            if retry_immediate:
-                # retry handled by eval
-                results = try_eval()
-            else:
-                # execute w/ retry
-                results = retry(try_eval)
+            with spend_cap_scope(spend):
+                if retry_immediate:
+                    # retry handled by eval
+                    results = try_eval()
+                else:
+                    # execute w/ retry
+                    results = retry(try_eval)
 
             # final sweep to remove failed log files
             if retry_cleanup:
@@ -1332,7 +1409,9 @@ def eval_set(
             )
 
         # report final status
-        success = all_evals_succeeded(results)
+        success = all_evals_succeeded(results) and not (
+            spend is not None and spend.tripped
+        )
         if success:
             msg = status_msg(f"Completed all tasks in '{log_dir}' successfully")
         else:
@@ -1715,6 +1794,18 @@ def _recover_crashed_log(
 # the protocol these implement.
 
 
+class _DefinitionCompletion(NamedTuple):
+    """The definition's settings a `completion="definition"` worker applies to a `resume` log, as the eval-set path applies them to a task's latest log."""
+
+    incomplete_action: IncompleteAction
+    incomplete_max: int | float | None
+    epochs: Epochs | None
+    limit: int | tuple[int, int] | None
+    sample_id: str | int | list[str] | list[int] | list[str | int] | None
+    task_names: list[str]
+    """Names of every task in the eval set, for `task:id` sample selectors."""
+
+
 class PrunedTaskMissing(Exception):
     """A selected task was absent from a resolution that skipped tasks.
 
@@ -1732,13 +1823,19 @@ def _run_eval_set_selection(
     eval_set_args: EvalSetArgsInTaskIdentifier,
     run_eval: Callable[[str, list[ResolvedTask | PreviousTask]], list[EvalLog]],
     log_dir: str,
+    definition: _DefinitionCompletion | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a worker's share of an eval set.
 
     Reads the selection, narrows the eval set's resolved tasks to it, and runs
     just those through the ordinary `eval()` path. No eval-set orchestration is
     performed: the external runner that wrote the selection owns the log
-    directory, its metadata, and every retry decision.
+    directory, its metadata, and every retry decision, except under
+    `completion="definition"`. There the worker performs the definition's task
+    retries, and recovers a crashed `resume` log as the eval-set path recovers
+    a task's latest log, with the definition's `incomplete_action` and
+    `incomplete_max`, so a task whose recovered log is complete does not run
+    again.
 
     Args:
         selection: The selection document read from `INSPECT_EVAL_SET_SELECTION` (any operational overrides it carries have already been applied by the caller).
@@ -1746,6 +1843,7 @@ def _run_eval_set_selection(
         eval_set_args: Eval-set level args that participate in task identity.
         run_eval: Runs the selected tasks under an eval set id, returning their logs.
         log_dir: Log directory (for the keep-alive park's launch handoff).
+        definition: The definition's settings under `completion="definition"`, or `None` under `completion="runner"`.
 
     Returns:
         Whether every selected task succeeded, and the logs they produced.
@@ -1753,9 +1851,14 @@ def _run_eval_set_selection(
     Raises:
         PrerequisiteError: If the selection does not correspond to this eval set's tasks.
     """
-    selected = _selected_eval_set_tasks(resolved_tasks, selection, eval_set_args)
+    selected = _selected_eval_set_tasks(
+        resolved_tasks, selection, eval_set_args, definition
+    )
     set_eval_set_id_display(selection.eval_set_id)
-    logs = run_eval(selection.eval_set_id, selected)
+    logs = [task for task in selected if isinstance(task, EvalLog)]
+    to_run = [task for task in selected if not isinstance(task, EvalLog)]
+    if to_run:
+        logs += run_eval(selection.eval_set_id, to_run)
 
     # keep-alive: park exactly as the eval-set path does — after the run, with
     # the task display closed. A worker binds its own (pid-keyed) socket, so
@@ -1771,16 +1874,18 @@ def _selected_eval_set_tasks(
     resolved_tasks: list[ResolvedTask],
     selection: EvalSetSelection,
     eval_set_args: EvalSetArgsInTaskIdentifier,
-) -> list[ResolvedTask | PreviousTask]:
+    definition: _DefinitionCompletion | None = None,
+) -> list[ResolvedTask | PreviousTask | EvalLog]:
     """Pick the tasks named by a worker's selection out of the resolved eval set.
 
     Args:
         resolved_tasks: All tasks resolved by this eval set (tasks × models).
         selection: Selection naming tasks by `task_identifier`.
         eval_set_args: Eval-set level args that participate in task identity.
+        definition: The definition's settings under `completion="definition"` (see `_resumed_task`).
 
     Returns:
-        The selected tasks, in selection order, with any task carrying a `resume` location wrapped as a `PreviousTask` so its completed samples are reused.
+        The selected tasks, in selection order, with any task carrying a `resume` location wrapped as a `PreviousTask` so its completed samples are reused, or replaced by its recovered log when recovery completed it (see `_resumed_task`).
 
     Raises:
         PrerequisiteError: If an identifier matches no resolved task or more than one of them, or if a `resume` log is missing or belongs to a different task.
@@ -1797,7 +1902,7 @@ def _selected_eval_set_tasks(
             continue
         by_identifier.setdefault(task_identifier(task, eval_set_args), []).append(task)
 
-    selected: list[ResolvedTask | PreviousTask] = []
+    selected: list[ResolvedTask | PreviousTask | EvalLog] = []
     for entry in selection.tasks:
         matches = by_identifier.get(entry.identifier, [])
         # `pruning_active()` as well as `pruned_anything()`, and the retry is
@@ -1828,7 +1933,7 @@ def _selected_eval_set_tasks(
                 "eval set must be uniquely identified."
             )
         selected.append(
-            _resumed_task(matches[0], entry.identifier, entry.resume)
+            _resumed_task(matches[0], entry.identifier, entry.resume, definition)
             if entry.resume is not None
             else matches[0]
         )
@@ -1836,13 +1941,22 @@ def _selected_eval_set_tasks(
     return selected
 
 
-def _resumed_task(task: ResolvedTask, identifier: str, resume: str) -> PreviousTask:
+def _resumed_task(
+    task: ResolvedTask,
+    identifier: str,
+    resume: str,
+    definition: _DefinitionCompletion | None = None,
+) -> PreviousTask | EvalLog:
     """Build the PreviousTask for a worker resuming from the `resume` log.
 
-    Recovery here deliberately uses the default "retry" disposition rather
-    than threading `incomplete_action` through: in selection (worker) mode the
-    external runner that assigned this resume owns retry/completion decisions,
-    so a worker never resolves stalled samples on its own.
+    Under `completion="runner"` (`definition` is `None`) a crashed log is
+    recovered with the default "retry" disposition: the runner that assigned
+    this resume owns completion decisions, so the worker never resolves
+    stalled samples on its own. Under `completion="definition"` a crashed log
+    is recovered as the eval-set path recovers a task's latest log, with the
+    definition's `incomplete_action` and `incomplete_max`. When that recovery
+    leaves a complete log (as `incomplete_action="error"` can), the recovered
+    log is returned in place of a PreviousTask, so the task does not run again.
     """
     from inspect_ai.log._file import log_file_info
 
@@ -1862,7 +1976,25 @@ def _resumed_task(task: ResolvedTask, identifier: str, resume: str) -> PreviousT
             f"'{identifier}' belongs to a different task ('{log_identifier}')."
         )
 
-    eval_log, log_info = _recover_crashed_log(eval_log, log_info)
+    if definition is None:
+        eval_log, log_info = _recover_crashed_log(eval_log, log_info)
+    else:
+        recovered, recovered_info = _recover_crashed_log(
+            eval_log,
+            log_info,
+            incomplete_action=definition.incomplete_action,
+            incomplete_max=definition.incomplete_max,
+        )
+        if recovered is not eval_log and log_complete(
+            Log(info=recovered_info, header=recovered, task_identifier=identifier),
+            [(identifier, task)],
+            definition.task_names,
+            epochs=definition.epochs,
+            limit=definition.limit,
+            sample_id=definition.sample_id,
+        ):
+            return recovered
+        eval_log, log_info = recovered, recovered_info
     return PreviousTask(
         id=eval_log.eval.task_id,
         task=task.task,
@@ -1968,24 +2100,11 @@ def list_latest_eval_logs(
     complete_logs: list[Log] = []
     incomplete_logs: list[Log] = []
     task_names = resolved_task_names([task for _, task in all_tasks])
-    # epochs_changed is applied per task inside log_samples_complete, where
-    # the eval-level epochs can be merged with the task's own reducer
     for log in latest_logs:
-        if log.header.status != "success":
-            incomplete_logs.append(log)
-        elif log.header.invalidated:
-            incomplete_logs.append(log)
-        elif not log_samples_complete(
-            log,
-            all_tasks,
-            task_names,
-            epochs=epochs,
-            limit=limit,
-            sample_id=sample_id,
-        ):
-            incomplete_logs.append(log)
-        else:
+        if log_complete(log, all_tasks, task_names, epochs, limit, sample_id):
             complete_logs.append(log)
+        else:
+            incomplete_logs.append(log)
 
     # separate eval()/eval_set() runs of one task each get their own task_id,
     # so the per-task_id selection above can hold several logs for one task
@@ -1996,6 +2115,31 @@ def list_latest_eval_logs(
         for tid, task in all_tasks
     }
     return one_log_per_task_identifier(complete_logs, incomplete_logs, requested)
+
+
+def log_complete(
+    log: Log,
+    all_tasks: list[tuple[str, ResolvedTask]],
+    task_names: list[str],
+    epochs: Epochs | None,
+    limit: int | tuple[int, int] | None,
+    sample_id: str | int | list[str] | list[int] | list[str | int] | None,
+) -> bool:
+    """Whether the eval-set path counts `log` as finished, so its task does not run again."""
+    # epochs_changed is applied per task inside log_samples_complete, where
+    # the eval-level epochs can be merged with the task's own reducer
+    return (
+        log.header.status == "success"
+        and not log.header.invalidated
+        and log_samples_complete(
+            log,
+            all_tasks,
+            task_names,
+            epochs=epochs,
+            limit=limit,
+            sample_id=sample_id,
+        )
+    )
 
 
 def log_samples_complete(
@@ -2094,6 +2238,50 @@ def log_samples_complete(
     if log.header.results.total_samples < planned:
         return False
     return True
+
+
+def _captured_task_logs(
+    resolved_tasks: list[ResolvedTask],
+    eval_set_args: EvalSetArgsInTaskIdentifier,
+    log_dir: str,
+    *,
+    epochs: int | Epochs | None,
+    limit: int | tuple[int, int] | None,
+    sample_id: str | int | list[str] | list[int] | list[str | int] | None,
+    sample_shuffle: bool | int | None,
+) -> dict[str, TaskLogVerdict]:
+    """Each task's log in `log_dir`, with the completion verdict the eval-set path reaches on it.
+
+    Lists and classifies logs as the eval-set path does, from headers only, but never cleans up or recovers a log, since both write to the log directory. So a crashed (`started`) log is incomplete whatever `incomplete_action` says (a `completion="definition"` resume of it applies the disposition). Logs of tasks outside the eval set are skipped rather than refused: refusing them is the eval-set path's or the runner's decision.
+
+    As on the eval-set path, logs of another sample shuffle under a `limit` are left out, and of a task's remaining logs the one `one_log_per_task_identifier()` chooses is the task's log.
+
+    Returns:
+        The log and verdict of every task that has a usable log, by task identifier.
+    """
+    all_tasks = [
+        (task_identifier(task, eval_set_args), task) for task in resolved_tasks
+    ]
+    identifiers = {identifier for identifier, _ in all_tasks}
+    logs = [
+        log
+        for log in list_all_eval_logs(log_dir)
+        if log.task_identifier in identifiers
+        and not shuffle_changed(sample_shuffle, log.header.eval.config, limit)
+    ]
+    complete_logs, incomplete_logs = list_latest_eval_logs(
+        all_tasks,
+        logs,
+        epochs=epochs,
+        limit=limit,
+        sample_id=sample_id,
+        cleanup_older=False,
+    )
+    return {
+        log.task_identifier: TaskLogVerdict(log.info.name, complete)
+        for complete, group in ((True, complete_logs), (False, incomplete_logs))
+        for log in group
+    }
 
 
 def shuffle_changed(
