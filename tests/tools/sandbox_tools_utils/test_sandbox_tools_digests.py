@@ -16,6 +16,7 @@ import importlib.resources
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -34,12 +35,21 @@ import pytest
 
 import inspect_ai.tool._sandbox_tools_utils.sandbox as sandbox_module
 from inspect_ai._util.error import PrerequisiteError
-from inspect_ai.tool._sandbox_tools_utils._build_config import filename_to_config
+from inspect_ai.tool._sandbox_tools_utils._build_config import (
+    SandboxToolsArch,
+    SandboxToolsBuildConfig,
+    config_to_filename,
+    filename_to_config,
+)
 from inspect_ai.tool._sandbox_tools_utils._digests import (
     lookup_digest,
     parse_sha256sums,
     read_sha256sums,
     write_sha256sums,
+)
+from inspect_ai.tool._sandbox_tools_utils.sandbox import (
+    _get_sandbox_tools_fork_revision,
+    _get_sandbox_tools_version,
 )
 
 
@@ -88,25 +98,76 @@ def test_digests_unreadable_file_raises(tmp_path: Path) -> None:
 
 
 def test_committed_sha256sums_format() -> None:
-    """The committed sums file pins the four arch x libc release artifacts.
+    """The committed sums file pins upstream's four -v{N} release artifacts.
 
     Deliberately does NOT assert that the shared version equals
     sandbox_tools_version.txt's: on a release PR the version bumps at PR-open
     while the sums are rewritten only at post-approval upload, so a lockstep
     assertion here would keep the fast suite red for the whole review window.
     Version lockstep belongs solely to the slow-tool-tests-release CI gate.
+
+    Upstream's own rows carry no fork-revision suffix, so `filename_to_config`
+    (which requires one) cannot parse them; matched by a plain regex instead.
     """
+    upstream_pattern = re.compile(
+        r"^inspect-sandbox-tools-(?P<arch>amd64|arm64)"
+        r"(?P<musl>-musl)?-v(?P<version>\d+)$"
+    )
     entries = read_sha256sums()
-    assert len(entries) == 4
-    configs = [filename_to_config(name) for name in entries]
-    assert all(config.suffix is None for config in configs)
-    assert len({config.version for config in configs}) == 1
-    assert {(config.arch, config.musl) for config in configs} == {
+    upstream_entries = {
+        name: match
+        for name in entries
+        if (match := upstream_pattern.match(name)) is not None
+    }
+    assert len(upstream_entries) == 4
+    assert len({m.group("version") for m in upstream_entries.values()}) == 1
+    assert {
+        (m.group("arch"), m.group("musl") is not None)
+        for m in upstream_entries.values()
+    } == {
         ("amd64", False),
         ("amd64", True),
         ("arm64", False),
         ("arm64", True),
     }
+
+
+def test_committed_sha256sums_has_current_fork_revision_rows() -> None:
+    """Assert every producible fork artifact name has a SHA256SUMS row.
+
+    Every artifact name the fork's build config can produce for the
+    currently pinned (version, fork revision) must have a SHA256SUMS row.
+
+    The fork serves binaries from its own GitHub release under names carrying
+    `-tl{fork_rev}`, distinct from upstream's `-v{N}` rows asserted by
+    `test_committed_sha256sums_format`. If a revision bump lands without the
+    corresponding publish step writing digests for it, every fresh install
+    fails to verify its download (the runtime refuses a binary with no pinned
+    digest) — this test catches that at commit time instead of at install time.
+    """
+    version = int(_get_sandbox_tools_version())
+    fork_rev = _get_sandbox_tools_fork_revision()
+    archs: tuple[SandboxToolsArch, ...] = ("amd64", "arm64")
+    expected_names = {
+        config_to_filename(
+            SandboxToolsBuildConfig(
+                arch=arch, version=version, fork_rev=fork_rev, suffix=None, musl=musl
+            )
+        )
+        for arch in archs
+        for musl in (False, True)
+    }
+    entries = read_sha256sums()
+    missing = expected_names - entries.keys()
+    assert not missing, (
+        f"SHA256SUMS is missing digest rows for {sorted(missing)}; publish "
+        f"v{version}-tl{fork_rev} (upload_to_github_release.py writes these "
+        f"rows) and commit the rewritten SHA256SUMS."
+    )
+    for name in expected_names:
+        config = filename_to_config(name)
+        assert config.version == version
+        assert config.fork_rev == fork_rev
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +281,10 @@ async def test_download_from_s3_missing_sums_entry_raises_without_network(
 # sandbox._open_executable_for_arch
 # ---------------------------------------------------------------------------
 
-_GLIBC = "inspect-sandbox-tools-amd64-v999"
-_GLIBC_DEV = "inspect-sandbox-tools-amd64-v999-dev"
+# Fork artifact names carry the fork revision (`-tl<rev>`) after the version.
+_TL = f"-tl{sandbox_module._get_sandbox_tools_fork_revision()}"
+_GLIBC = f"inspect-sandbox-tools-amd64-v999{_TL}"
+_GLIBC_DEV = f"inspect-sandbox-tools-amd64-v999{_TL}-dev"
 
 
 @pytest.fixture
@@ -315,7 +378,7 @@ async def test_open_executable_pypi_musl_downloads_from_s3(
     binaries: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _install_state(monkeypatch, "pypi")
-    musl = "inspect-sandbox-tools-amd64-musl-v999"
+    musl = f"inspect-sandbox-tools-amd64-musl-v999{_TL}"
     write_sha256sums({musl: _sha256(b"musl")}, tmp_path / "SHA256SUMS")
 
     async def download(filename: str) -> bool:
@@ -331,7 +394,7 @@ async def test_open_executable_rejects_tampered_downloaded_binary(
     binaries: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _install_state(monkeypatch, "pypi")
-    musl = "inspect-sandbox-tools-amd64-musl-v999"
+    musl = f"inspect-sandbox-tools-amd64-musl-v999{_TL}"
     write_sha256sums({musl: _sha256(b"musl")}, tmp_path / "SHA256SUMS")
 
     async def download(filename: str) -> bool:
