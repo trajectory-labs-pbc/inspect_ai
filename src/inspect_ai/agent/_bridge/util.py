@@ -849,6 +849,7 @@ async def bridge_generate(
         GenerateConfig,
     ]
     | None = None,
+    review_names: Mapping[str, str] | None = None,
 ) -> tuple[ModelOutput, ChatMessageUser | None]:
     """Generate model output through the agent bridge.
 
@@ -859,7 +860,13 @@ async def bridge_generate(
     generated from on each attempt, after compaction and any filter rewrite, so a
     declaration the filter removed cannot authorize a host call and one it added
     can; the result takes part only in resolving execution grants and is never
-    sent to the model.
+    sent to the model. For a provider without the Responses API, the Responses
+    bridge's client tool discovery also declares discovered tools in `tools`, under
+    the names the model is shown, so a filter withdraws one by removing it from
+    `tools` and from the discovery result (the result is itself a declaration).
+
+    `review_names` maps a tool name the model was shown to the name its calls are
+    approved under (see `_approval.apply_bridge_tool_approval`).
 
     If a filter is configured, it will be called on each attempt (including retries).
     The filter can either return a ModelOutput directly or modify the generation inputs.
@@ -907,6 +914,7 @@ async def bridge_generate(
             declared_in_input,
             routing,
             finalize_config,
+            review_names,
         )
 
 
@@ -924,6 +932,7 @@ async def _bridge_generate_impl(
         GenerateConfig,
     ]
     | None,
+    review_names: Mapping[str, str] | None,
 ) -> tuple[ModelOutput, ChatMessageUser | None]:
     """Implementation of bridge_generate (see wrapper)."""
     # restore operator provenance lost to a bridged scaffold's round-trip (e.g.
@@ -1089,7 +1098,7 @@ async def _bridge_generate_impl(
             declarations.extend(declared_in_input(input_messages))
         with agent_bridge_context_scope(_UTILITY_CONTEXT):
             reviewed = await apply_bridge_tool_approval(
-                bridge, output, input_messages, declarations
+                bridge, output, input_messages, declarations, review_names
             )
         if reviewed.rejection is None:
             # executions are placed in the proposing ModelEvent's span; only one
