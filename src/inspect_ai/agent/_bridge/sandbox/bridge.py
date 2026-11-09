@@ -68,6 +68,7 @@ async def sandbox_agent_bridge(
     client_mcp_servers: bool | None = None,
     bridged_tools: Sequence[BridgedToolsSpec] | None = None,
     model_event_sink: ModelEventSink | None = None,
+    model_event_metadata_headers: Sequence[str] | None = None,
     forward_generation_config: bool = False,
     approval: list["ApprovalPolicy"] | None = None,
     checkpointer: Checkpointer | None = None,
@@ -170,6 +171,14 @@ async def sandbox_agent_bridge(
             on the proposing `ModelEvent` by the time `on_complete` returns,
             and is recorded right away: a span set later, or a `ModelEvent`
             the sink emits later, is not matched up with it.
+        model_event_metadata_headers: Optional non-sensitive client request
+            header names to copy into each matching bridged `ModelEvent`'s
+            metadata under `BRIDGE_REQUEST_HEADERS`. Names are matched
+            case-insensitively and recorded in lower case. Selection is
+            independent of `forward_client_headers`: a header recorded here is
+            not forwarded to the model provider unless that option lists it.
+            Sensitive names (e.g. authorization, cookies, API keys) are
+            rejected. Defaults to `None`.
         forward_generation_config: Forward client generation parameters (e.g.
             `max_tokens`, `temperature`, reasoning effort) to the model. Defaults
             to `False`, in which case those parameters are dropped and the resolved
@@ -246,6 +255,7 @@ async def sandbox_agent_bridge(
                 model_aliases=model_aliases,
                 model_resolver=model_resolver,
                 model_event_sink=model_event_sink,
+                model_event_metadata_headers=model_event_metadata_headers,
                 forward_generation_config=forward_generation_config,
                 approval=approval,
                 checkpointer=checkpointer,

@@ -249,6 +249,27 @@ def filter_bridge_headers(headers: dict[str, str] | None) -> dict[str, str] | No
     return _with_decodable_accept_encoding(filtered)
 
 
+def select_model_event_metadata_headers(
+    headers: object, names: frozenset[str]
+) -> dict[str, str] | None:
+    """Select a sandboxed client's headers named in `names` for `ModelEvent` metadata.
+
+    `names` are the bridge's lower-case `model_event_metadata_headers`. Header
+    names are matched case-insensitively and returned in lower case. The result
+    is recorded on the request's `ModelEvent`s only and never forwarded to the
+    model provider (that is `filter_sandbox_client_headers`' decision). Returns
+    `None` when nothing is configured or the request carries none of the names.
+    """
+    if not names or not isinstance(headers, dict):
+        return None
+    selected = {
+        name.lower(): value
+        for name, value in headers.items()
+        if isinstance(name, str) and isinstance(value, str) and name.lower() in names
+    }
+    return selected or None
+
+
 def filter_sandbox_client_headers(
     headers: object,
     forward_client_headers: Mapping[str, frozenset[str]],
