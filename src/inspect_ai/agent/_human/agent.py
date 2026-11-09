@@ -1,4 +1,5 @@
-from typing import cast
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from typing import AsyncIterator, Callable, cast
 
 import anyio
 
@@ -23,6 +24,7 @@ def human_cli(
     instructions: str | None = None,
     bashrc: str | None = None,
     commands_filter: HumanAgentCommandsFilter | None = None,
+    on_ready: Callable[[], AbstractAsyncContextManager[None]] | None = None,
 ) -> Agent:
     """Human CLI agent for tasks that run in a sandbox.
 
@@ -54,6 +56,8 @@ def human_cli(
           ValueError` otherwise): the login shell unconditionally runs
           `task start` to begin the task clock over the sandbox service
           RPC, and submission refuses to complete while it never has.
+       on_ready: Optional async context manager entered after the human command
+          service is available in the sandbox and exited when the session ends.
 
     Returns:
        Agent: Human CLI agent.
@@ -91,11 +95,27 @@ def human_cli(
                     # install agent tools
                     await install_human_agent(user, commands, bashrc, record_session)
 
-                    # hookup the view ui
-                    view.connect(connection)
+                    ready_callback: (
+                        Callable[[], AbstractAsyncContextManager[None]] | None
+                    )
+                    if on_ready is None:
+                        view.connect(connection)
+                        ready_callback = None
+                    else:
+                        user_on_ready = on_ready
+
+                        @asynccontextmanager
+                        async def connect_view_when_ready() -> AsyncIterator[None]:
+                            async with user_on_ready():
+                                view.connect(connection)
+                                yield
+
+                        ready_callback = connect_view_when_ready
 
                     # run sandbox service
-                    return await run_human_agent_service(user, state, commands, view)
+                    return await run_human_agent_service(
+                        user, state, commands, view, ready_callback
+                    )
 
             # support both fullscreen ui and fallback
             if display_type() == "full":
