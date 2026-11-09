@@ -91,6 +91,7 @@ async def sandbox_agent_bridge(
     forward_client_headers: Mapping[str, Sequence[str]] | None = None,
     response_filter: ModelResponseFilter | None = None,
     state_filter: StateFilter | None = None,
+    accumulate_conversations: bool = False,
 ) -> AsyncIterator[SandboxAgentBridge]:
     """Sandbox agent bridge.
 
@@ -230,6 +231,11 @@ async def sandbox_agent_bridge(
             generations update the yielded state's messages and output.
             Rejected requests still receive normal model responses and model
             events, and still tick the checkpointer.
+        accumulate_conversations: Keep every conversation observed over the bridge
+            rather than tracking a single main one. Defaults to `False`, which surfaces
+            the main agent loop and treats other traffic as side calls. Set `True` when
+            the sandbox may run several independent conversations: `state.messages`
+            then holds each in the order they started.
     """
     # instance id for this bridge
     instance = f"proxy_{uuid()}"
@@ -289,6 +295,7 @@ async def sandbox_agent_bridge(
                 allow_remote_mcp=allow_remote_mcp,
                 forward_client_headers=forward_client_headers,
                 response_filter=response_filter,
+                accumulate_conversations=accumulate_conversations,
             )
 
             # register bridged tools with the bridge
@@ -349,6 +356,7 @@ async def sandbox_agent_bridge(
                     yield bridge
                 agent_completed = True
             finally:
+                bridge.close_conversation_spans()
                 with anyio.CancelScope(shield=True):
                     # ensure the process terminates (no-op if already dead)
                     await proxy.kill()
