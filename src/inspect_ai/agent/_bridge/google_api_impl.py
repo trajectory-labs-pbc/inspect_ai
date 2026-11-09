@@ -201,7 +201,9 @@ async def inspect_google_api_request_impl(
             )
 
     # update state if we have more messages than the last generation
-    await bridge._track_state(messages, output, [transported])
+    await bridge._track_state(
+        messages, output, [transported], model=str(ModelName(model))
+    )
 
     return response
 
