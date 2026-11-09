@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from logging import getLogger
 from typing import (
@@ -71,6 +72,14 @@ from .sample_source import SampleSource
 
 logger = getLogger(__name__)
 
+SampleResource = Callable[[TaskState], AbstractAsyncContextManager[None]]
+"""Factory for a resource held open for the duration of one sample.
+
+Called with the sample's initial `TaskState` once its sandbox is available; the
+returned context manager is entered before the plan runs and exited after
+scoring, in the sample's own task. See `Task`'s `sample_resources` argument.
+"""
+
 
 class TaskDeprecatedArgs(TypedDict, total=False):
     plan: Plan | Solver | Sequence[Solver]
@@ -125,6 +134,7 @@ class Task:
         sentinel: SentinelSpec | None = None,
         *,
         description: str | None = None,
+        sample_resources: "Sequence[SampleResource] | None" = None,
         **kwargs: Unpack[TaskDeprecatedArgs],
     ) -> None:
         """Create a task.
@@ -215,6 +225,14 @@ class Task:
                 first metric of the first score.
             sentinel: Monitors and protocols that watch the agent's steps (requires the `inspect_sentinel` package). Experimental: not yet a stable API; may change without notice.
                 A protocol, a list or mapping of monitors and protocols with at least one protocol, a config file path or registered protocol name, or a parsed configuration. Monitors alone are an error: wrap them in `observe_only()` to record without acting. Defaults to no sentinel.
+            sample_resources: Async context managers held open for the whole of
+                each sample. Entered once the sample's sandbox is available and
+                exited after scoring and `cleanup`, in the sample's own task, so
+                a resource can span setup, solver and scoring. Use for a
+                connection or process a sample should pay for once (e.g. holding
+                one MCP server for the sample rather than per solver or per tool
+                call). Not part of the task's plan, so adding one does not change
+                task identity or eval-set resume.
             **kwargs: Deprecated arguments.
         """
         # handle deprecated args
@@ -282,6 +300,7 @@ class Task:
         self.tags = tags
         self.viewer = viewer
         self.headline_metric = resolve_headline_metric_spec(headline_metric)
+        self.sample_resources = list(sample_resources) if sample_resources else []
 
     @property
     def name(self) -> str:
