@@ -153,6 +153,7 @@ from inspect_ai.model._generate_config import (
 )
 from inspect_ai.model._message_ids import canonical_tool_arguments
 from inspect_ai.model._model import (
+    BRIDGE_FILTER_SYNTHETIC,
     GenerateInput,
     Model,
     ModelResponseFilter,
@@ -4639,7 +4640,10 @@ async def test_synthetic_request_filter_call_has_no_proposing_message() -> None:
         )
         await call_host_tool(bridge)("host", "read_file", {"path": "a"})
 
-    assert not any(isinstance(e, ModelEvent) for e in recorded.events)
+    # the filter's answer is recorded only as a synthetic event, not a generation
+    [answered] = [e for e in recorded.events if isinstance(e, ModelEvent)]
+    assert answered.call is None
+    assert (answered.metadata or {}).get(BRIDGE_FILTER_SYNTHETIC) is True
     [event] = recorded.tool_events
     assert event.call_message_id is None
 

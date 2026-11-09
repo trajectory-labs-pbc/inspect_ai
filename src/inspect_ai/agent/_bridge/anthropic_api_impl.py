@@ -117,6 +117,7 @@ async def inspect_anthropic_api_request_impl(
     bridge: AgentBridge,
     *,
     beta: bool = False,
+    metadata_headers: dict[str, str] | None = None,
 ) -> Message | BetaMessage:
     # resolve model
     bridge_model_name = str(json_data["model"])
@@ -203,6 +204,7 @@ async def inspect_anthropic_api_request_impl(
         config,
         requested_model=bridge_model_name,
         routing=routing,
+        metadata_headers=metadata_headers,
     )
     if c_message is not None:
         messages.append(c_message)

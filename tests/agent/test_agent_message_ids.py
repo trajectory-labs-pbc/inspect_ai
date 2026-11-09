@@ -79,7 +79,7 @@ from inspect_ai.model._message_ids import (
     edited_message,
     stable_message_ids,
 )
-from inspect_ai.model._model import active_model_context_var
+from inspect_ai.model._model import BRIDGE_FILTER_SYNTHETIC, active_model_context_var
 from inspect_ai.model._model_output import ChatCompletionChoice, ModelUsage
 from inspect_ai.solver import generate, user_message
 from inspect_ai.tool import (
@@ -1127,7 +1127,13 @@ def _reply_events(
     assert log.status == "success", log.error
     assert log.samples
     sample = log.samples[0]
-    return [e for e in sample.events if isinstance(e, ModelEvent)], sample
+    # the generations, without the events recording a request filter's own answer
+    return [
+        e
+        for e in sample.events
+        if isinstance(e, ModelEvent)
+        and not (e.metadata or {}).get(BRIDGE_FILTER_SYNTHETIC)
+    ], sample
 
 
 @pytest.mark.parametrize("shape", ["middle_dropped", "sliding_window", "kept_prefix"])

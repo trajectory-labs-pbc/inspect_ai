@@ -84,6 +84,9 @@ from inspect_ai.model._message_ids import (
     with_edited_id,
 )
 from inspect_ai.model._model import (
+    BRIDGE_FILTER_SYNTHETIC,
+    BRIDGE_REQUEST_HEADERS,
+    BRIDGE_REQUESTED_MODEL,
     GenerateFilter,
     GenerateInput,
     Model,
@@ -101,6 +104,7 @@ from inspect_ai.model._model import (
     model_roles,
     observe_generations,
     requested_model,
+    use_model_event_metadata,
     use_model_event_sink,
 )
 from inspect_ai.model._model_output import ModelOutput
@@ -1340,6 +1344,65 @@ def narrow_to_false(current: Any, value: Any) -> Any:
     return False if value is False and current is not False else None
 
 
+def _record_filter_answered_interaction(
+    sink: ModelEventSink | None,
+    model: Model,
+    input: list[ChatMessage],
+    tools: Sequence[ToolInfo | Tool],
+    tool_choice: ToolChoice | None,
+    config: GenerateConfig,
+    output: ModelOutput,
+) -> None:
+    """Record a `ModelEvent` for output a bridge filter produced without generating.
+
+    The event carries the `ModelOutput` the filter returned, so a transcript
+    consumer can trace the resulting assistant message back to it. `call` stays
+    `None` (no provider request was made) and `BRIDGE_FILTER_SYNTHETIC` marks
+    the event, so a consumer counting provider round-trips can exclude it. Like
+    a generation's own event, it is recorded before any `response_filter` runs
+    and keeps the output the filter returned.
+    """
+    with (
+        use_model_event_sink(sink),
+        use_model_event_metadata({BRIDGE_FILTER_SYNTHETIC: True}),
+    ):
+        # _record_model_interaction self-completes when given output, so no
+        # explicit complete() here: a second call would forward the event
+        # through the sink twice.
+        model._record_model_interaction(
+            input=input,
+            tools=get_tools_info(tools),
+            tool_choice=tool_choice if tool_choice is not None else "auto",
+            config=config,
+            cache=None,
+            output=output,
+            call=None,
+        )
+
+
+def _bridge_request_metadata(
+    bridge: AgentBridge,
+    requested_model: str | None,
+    metadata_headers: Mapping[str, str] | None,
+    codex_thread_metadata: dict[str, str] | None,
+) -> dict[str, Any]:
+    """The metadata stamped onto every `ModelEvent` of a bridged request."""
+    metadata: dict[str, Any] = {}
+    if bridge.model_event_metadata_headers and metadata_headers:
+        selected = {
+            name: metadata_headers[name]
+            for name in sorted(bridge.model_event_metadata_headers)
+            if name in metadata_headers
+        }
+        if selected:
+            metadata[BRIDGE_REQUEST_HEADERS] = selected
+    if requested_model:
+        metadata[BRIDGE_REQUESTED_MODEL] = requested_model
+    if codex_thread_metadata is not None:
+        metadata["agent_bridge"] = {"codex": codex_thread_metadata}
+    return metadata
+
+
 async def bridge_generate(
     bridge: AgentBridge,
     model: Model,
@@ -1357,6 +1420,8 @@ async def bridge_generate(
     ]
     | None = None,
     distinct_call_ids: bool = False,
+    metadata_headers: Mapping[str, str] | None = None,
+    codex_thread_metadata: dict[str, str] | None = None,
 ) -> tuple[ModelOutput, ChatMessageUser | None]:
     """Generate model output through the agent bridge.
 
@@ -1403,6 +1468,16 @@ async def bridge_generate(
     compaction (which can make its own model call), the filter and the
     generation's cache lookup, so a scaffold that retries after a limit's
     error reply makes no further model call.
+
+    Every `ModelEvent` emitted for the request carries metadata identifying it:
+    `BRIDGE_REQUESTED_MODEL` (the requested name, which alias resolution can
+    erase from `ModelEvent.model`), `BRIDGE_REQUEST_HEADERS` (the request's
+    headers among the bridge's `model_event_metadata_headers`, as
+    `metadata_headers` supplies them) and, for a Codex Responses request,
+    `agent_bridge.codex` (`codex_thread_metadata`: its thread and, for a spawned
+    sub-agent, its parent thread). When the filter answers with output of its
+    own without generating, a `ModelEvent` marked `BRIDGE_FILTER_SYNTHETIC`
+    records that output.
     """
     if routing is not None and routing.redirected:
         _warn_redirect(routing, bridge.model)
@@ -1414,6 +1489,11 @@ async def bridge_generate(
         # for what produced the response (the sentinel's tool steps), and the
         # calls the request's generations made (`_hold_replay_state`)
         observe_generations(generations.record),
+        use_model_event_metadata(
+            _bridge_request_metadata(
+                bridge, requested_model, metadata_headers, codex_thread_metadata
+            )
+        ),
     ):
         try:
             return await _bridge_generate_impl(
@@ -1554,6 +1634,24 @@ async def _bridge_generate_impl(
                     # not verified against the generation
                     if output.message.id != result.message.id:
                         generated_output = None
+                    if not filter_events:
+                        # The filter answered instead of the provider, so no
+                        # generation recorded the output the scaffold gets.
+                        # Record it, so the assistant message it becomes is
+                        # accounted for by a ModelEvent (`call=None` and
+                        # BRIDGE_FILTER_SYNTHETIC set it apart from a provider
+                        # round-trip). A filter that generated (e.g. by calling
+                        # `model.generate()`) recorded its own event, so a
+                        # second one would show the same output twice.
+                        _record_filter_answered_interaction(
+                            sink,
+                            model,
+                            input_messages,
+                            tools,
+                            tool_choice,
+                            config,
+                            output,
+                        )
                 elif isinstance(result, GenerateInput):
                     # Update the inputs that will be used for generation
                     input_messages, tools, tool_choice, config = result

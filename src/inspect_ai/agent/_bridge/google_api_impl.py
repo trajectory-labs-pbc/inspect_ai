@@ -77,6 +77,7 @@ async def inspect_google_api_request_impl(
     bridge: AgentBridge,
     *,
     requested_model: str | None = None,
+    metadata_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     # resolve model
     client_model = json_data.get("model")
@@ -172,6 +173,7 @@ async def inspect_google_api_request_impl(
         # Gemini CLI keys a response's calls by id, so calls sharing one would
         # run as one
         distinct_call_ids=True,
+        metadata_headers=metadata_headers,
     )
     if c_message is not None:
         messages.append(c_message)
