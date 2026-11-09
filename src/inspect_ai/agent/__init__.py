@@ -15,7 +15,7 @@ from ._bridge.context import (
 )
 from ._bridge.sandbox.bridge import sandbox_agent_bridge
 from ._bridge.sandbox.types import SandboxAgentBridge
-from ._bridge.types import AgentBridge
+from ._bridge.types import AgentBridge, StateFilter
 from ._channel import (
     AgentChannel,
     AgentInterrupted,
@@ -46,6 +46,7 @@ __all__ = [
     "sandbox_agent_bridge",
     "AgentBridge",
     "SandboxAgentBridge",
+    "StateFilter",
     "BridgedToolsSpec",
     # Agent bridge context (ambient identity of the calling agent)
     "AgentBridgeContext",
