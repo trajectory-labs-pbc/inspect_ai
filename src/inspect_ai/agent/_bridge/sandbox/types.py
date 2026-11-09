@@ -74,6 +74,7 @@ class SandboxAgentBridge(AgentBridge):
         response_filter: ModelResponseFilter | None = None,
         *,
         state_filter: StateFilter | None = None,
+        accumulate_conversations: bool = False,
     ) -> None:
         super().__init__(
             state,
@@ -91,6 +92,7 @@ class SandboxAgentBridge(AgentBridge):
             model_resolver=model_resolver,
             response_filter=response_filter,
             state_filter=state_filter,
+            accumulate_conversations=accumulate_conversations,
         )
         self.port = port
         self.mcp_server_configs = mcp_server_configs or []
