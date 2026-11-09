@@ -66,6 +66,9 @@ def _unchanged(arguments: dict[str, Any]) -> dict[str, Any]:
     return arguments
 
 
+StateFilter = Callable[[Sequence[ChatMessage]], bool]
+
+
 class AgentBridge:
     """Agent bridge."""
 
@@ -86,6 +89,8 @@ class AgentBridge:
         model_resolver: ModelResolver | None = None,
         allow_client_model_names: bool = False,
         response_filter: ModelResponseFilter | None = None,
+        *,
+        state_filter: StateFilter | None = None,
     ) -> None:
         # Capabilities a client-declared request may reach for. Media and
         # client-chosen model names default closed so new bridge subclasses
@@ -141,6 +146,7 @@ class AgentBridge:
         self.model_event_sink = model_event_sink
         self.forward_generation_config = forward_generation_config
         self.approval = approval
+        self.state_filter = state_filter
         self._compaction = compaction
         self._compact: Compact | None = None
         self._last_message_counts: dict[str | None, int] = {}
@@ -177,6 +183,14 @@ class AgentBridge:
     """Filter that can replace model output after generation (see ``ModelResponseFilter``).
 
     Return ``None`` to pass through; return a ``ModelOutput`` to replace the response.
+    """
+
+    state_filter: StateFilter | None
+    """Optional predicate that selects requests whose generations update state.
+
+    Requests rejected by the predicate still generate responses, emit model
+    events, and tick the checkpointer, but leave tracked conversation state
+    unchanged. Exceptions from the predicate propagate to the request handler.
     """
 
     model: str | None
@@ -404,6 +418,10 @@ class AgentBridge:
         We need to distinguish the "main" thread of generation from side /
         sub-agent model calls (e.g. claude code does bash path detection with a
         side call; opencode names the session with a title-generation call).
+        An optional state filter determines which requests contribute to the
+        canonical agent state. Rejected requests still complete normally but
+        leave the tracked conversation unchanged.
+
         Message counts alone can't do this: a side call that is longer than the
         main conversation (opencode's title call fires before the main loop's
         first call and carries an extra preamble message) would permanently
@@ -459,6 +477,10 @@ class AgentBridge:
           or by the longer-descending-call displacement above when it makes
           only one.
         """
+        if self.state_filter is not None and not self.state_filter(input):
+            await self._cp.tick()
+            return
+
         messages = input + [output.message]
         fps = [_message_fingerprint(m) for m in messages]
         last_message_count = self._last_message_counts.get(model, 0)
