@@ -763,6 +763,19 @@ def _openai_error_body(
     return {"error": error}
 
 
+# The fields of a streamed reply's `message_delta.delta`: the finished message's
+# stop fields. The host builds one message for streaming and non-streaming
+# requests alike and decides these fields there, so the streaming route copies
+# each of them from that message; a streamed reply then ends as the same reply
+# sent whole does (a refusal's `stop_details`, a `container`), instead of with
+# whichever fields this route once chose to copy.
+_ANTHROPIC_MESSAGE_DELTA_FIELDS = (
+    "stop_reason",
+    "stop_sequence",
+    "stop_details",
+    "container",
+)
+
 # The inverse of `status_code_of`: every status that helper can derive from a
 # provider error body must map back to its Anthropic error type here. A status
 # missing from this table degrades to `api_error`, and on the STREAMING route
@@ -2201,8 +2214,8 @@ async def model_proxy_server(
                     message_delta_data: dict[str, Any] = {
                         "type": "message_delta",
                         "delta": {
-                            "stop_reason": message.get("stop_reason"),
-                            "stop_sequence": message.get("stop_sequence"),
+                            field: message.get(field)
+                            for field in _ANTHROPIC_MESSAGE_DELTA_FIELDS
                         },
                         "usage": {
                             "output_tokens": usage.get("output_tokens", 0),

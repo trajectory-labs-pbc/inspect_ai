@@ -3745,3 +3745,113 @@ async def test_proxy_leaves_client_header_policy_to_host(
         headers = params["headers"]
         for name, value in _CLIENT_HEADERS.items():
             assert headers[name.lower()] == value
+
+
+# ---------- Stop fields on a streamed Anthropic reply ----------
+
+# What the host's generate_anthropic returns for a classifier refusal: the Message the bridge
+# builds, dumped. The host decides the stop fields once, for streaming and non-streaming
+# requests alike; the proxy's streaming conversion must hand every one of them on.
+_ANTHROPIC_REFUSAL_REPLY: dict[str, Any] = {
+    "id": "msg_refusal",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-x",
+    "content": [],
+    "stop_reason": "refusal",
+    "stop_sequence": None,
+    "stop_details": {
+        "type": "refusal",
+        "category": "cyber",
+        "explanation": "Cyber safeguards flagged this message.",
+    },
+    "container": None,
+    "usage": {"input_tokens": 20, "output_tokens": 0},
+}
+
+
+def _anthropic_reply(**fields: Any) -> dict[str, Any]:
+    return {
+        **_ANTHROPIC_REFUSAL_REPLY,
+        "content": [{"type": "text", "text": "partial"}],
+        "stop_reason": "end_turn",
+        "stop_details": None,
+        **fields,
+    }
+
+
+def _anthropic_reply_service(reply: dict[str, Any]) -> Any:
+    async def service(
+        method: str,
+        json_data: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert method == "generate_anthropic"
+        return json.loads(json.dumps(reply))
+
+    return service
+
+
+_ANTHROPIC_REQUEST: dict[str, Any] = {
+    "model": "claude-x",
+    "max_tokens": 8,
+    "messages": [{"role": "user", "content": "hi"}],
+}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_streamed_refusal_carries_its_stop_details() -> None:
+    """A streamed refusal's message_delta carries the category the host set."""
+    service = _anthropic_reply_service(_ANTHROPIC_REFUSAL_REPLY)
+    async with _proxy_with_service(service) as base_url:
+        client = AsyncAnthropic(base_url=base_url, api_key="test")
+        async with client.messages.stream(**_ANTHROPIC_REQUEST) as stream:
+            deltas = [e.delta async for e in stream if e.type == "message_delta"]
+            final = await stream.get_final_message()
+
+    assert len(deltas) == 1
+    assert deltas[0].stop_reason == "refusal"
+    assert deltas[0].stop_details is not None
+    assert deltas[0].stop_details.category == "cyber"
+    assert (
+        deltas[0].stop_details.explanation == "Cyber safeguards flagged this message."
+    )
+    assert final.stop_details is not None
+    assert final.stop_details.category == "cyber"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(_ANTHROPIC_REFUSAL_REPLY, id="refusal"),
+        pytest.param(
+            _anthropic_reply(stop_reason="stop_sequence", stop_sequence="###"),
+            id="stop-sequence",
+        ),
+        pytest.param(
+            _anthropic_reply(
+                container={"id": "container_1", "expires_at": "2026-11-20T00:00:00Z"}
+            ),
+            id="container",
+        ),
+        pytest.param(_anthropic_reply(), id="end-turn"),
+    ],
+)
+async def test_anthropic_streamed_reply_ends_like_the_non_streamed_one(
+    reply: dict[str, Any],
+) -> None:
+    """Every field a message_delta can carry reaches a streaming client as it reaches a non-streaming one."""
+    from anthropic.types.raw_message_delta_event import Delta
+
+    delta_fields = set(Delta.model_fields)
+    assert {"stop_reason", "stop_sequence", "stop_details", "container"} <= delta_fields
+
+    async with _proxy_with_service(_anthropic_reply_service(reply)) as base_url:
+        client = AsyncAnthropic(base_url=base_url, api_key="test")
+        plain = await client.messages.create(**_ANTHROPIC_REQUEST)
+        async with client.messages.stream(**_ANTHROPIC_REQUEST) as stream:
+            streamed = await stream.get_final_message()
+
+    for field in sorted(delta_fields):
+        assert getattr(streamed, field) == getattr(plain, field), field
