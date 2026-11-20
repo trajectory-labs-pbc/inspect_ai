@@ -50,6 +50,11 @@ from inspect_ai._display.core.display import (
     TaskScreen,
     TaskSpec,
 )
+from inspect_ai._eval.spend_cap import (
+    SPEND_CAP_REACHED,
+    spend_cap_reached,
+    spend_cap_task,
+)
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._eval.task.scan import Scanners
 from inspect_ai._sentinel._config import (
@@ -614,12 +619,20 @@ async def _run_task(
             # encloses only task_run, so the TaskSource is notified outside it
             async with anyio.create_task_group() as task_tg:
 
+                def cancel_for_spend_cap() -> None:
+                    task_cancel.reason = SPEND_CAP_REACHED
+                    task_cancel.request("abort")
+
                 async def run() -> None:
                     nonlocal result, abandoned, notifying, run_returned
                     error_after_write = False
                     with task_scope:
                         try:
-                            with creator_model_scope(options.model):
+                            with (
+                                spend_cap_task(cancel_for_spend_cap),
+                                creator_model_scope(options.model),
+                            ):
+                                await anyio.lowlevel.checkpoint_if_cancelled()
                                 result = await task_run(
                                     options, task_cancel=task_cancel
                                 )
@@ -683,7 +696,8 @@ async def _run_task(
                             result = unwritten_task_log(
                                 options.logger,
                                 TerminateTaskError(
-                                    "Task cancelled by user "
+                                    task_cancel.reason
+                                    or "Task cancelled by user "
                                     f"({task_cancel.cancel_type})"
                                 ),
                             )
@@ -1021,7 +1035,12 @@ async def dispatch_tasks(
                             )
                         elif result.status == "error":
                             retry = True
-                        retry = retry and record.retries_remaining > 0
+                        retry = (
+                            retry
+                            and record.retries_remaining > 0
+                            # the dispatcher starts nothing more once the cap is reached
+                            and not spend_cap_reached()
+                        )
 
                         # a drain/plain cancel issued while this attempt was
                         # tearing down (or between run_one iterations) stamped
@@ -1204,8 +1223,10 @@ async def dispatch_tasks(
                         # re-reading the live `ctl config --max-tasks` override
                         # each iteration (a set fires the dispatch wakers, so a
                         # raise reaches a waiting dispatcher immediately)
-                        while not cancelled and in_flight < effective_max_tasks(
-                            parallel
+                        while (
+                            not cancelled
+                            and not spend_cap_reached()
+                            and in_flight < effective_max_tasks(parallel)
                         ):
                             record = pick_balanced()
                             if record is None:
@@ -1215,7 +1236,7 @@ async def dispatch_tasks(
                                 break
                             start_attempt(record, counted=True)
 
-                        if cancelled:
+                        if cancelled or spend_cap_reached():
                             break
 
                         # a task cancelled while queued starts at once,

@@ -119,6 +119,7 @@ from .context import init_eval_context
 from .eval_set_pruning import is_placeholder
 from .loader import resolve_task_file_sandbox, resolve_task_source, resolve_tasks
 from .run import eval_run
+from .spend_cap import spend_cap_active, spend_cap_run
 from .task import Epochs, PreviousTask, Task, TaskSource
 from .task.enqueue import (
     RunQueue,
@@ -737,6 +738,7 @@ async def eval_async(
     return result
 
 
+@spend_cap_run()
 async def _eval_async_inner(
     tg: TaskGroup,
     tasks: Tasks,
@@ -885,7 +887,7 @@ async def _eval_async_inner(
                 "Error: No inspect tasks were found at the specified paths."
             )
 
-        resolve_model_costs(resolved_tasks, cost_limit)
+        resolve_model_costs(resolved_tasks, cost_limit, spend_cap_active())
 
         # make every resolved task's model addressable by the model pause
         # directives up-front, ahead of the dispatcher's own registration
@@ -1287,7 +1289,7 @@ def _resolve_enqueued_tasks(
                 "call enqueue_task(child()) in a solver), or set "
                 "INSPECT_EVAL_SET_NO_PRUNE=1."
             )
-    resolve_model_costs(resolved, cost_limit)
+    resolve_model_costs(resolved, cost_limit, spend_cap_active())
     return resolved
 
 
