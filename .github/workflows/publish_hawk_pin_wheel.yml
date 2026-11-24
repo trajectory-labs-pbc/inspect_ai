@@ -49,7 +49,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UV_VERSION: "0.12.3"
+  UV_VERSION: "0.13.5"
   PYTHON_VERSION: "3.12.13"
 
 jobs:
